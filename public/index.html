@@ -143,18 +143,30 @@
     flex-wrap: wrap;
     align-items: center;
   }
+  /* buttonデフォルトスタイルをリセットしてチップ見た目を維持 */
   .chip {
+    appearance: none;
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    margin: 0;
     padding: 4px 10px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--bg-card);
+    color: var(--text);
+    font-family: inherit;
     font-size: 13px;
+    line-height: inherit;
+    text-align: left;
     cursor: pointer;
     user-select: none;
     transition: background 0.15s, border-color 0.15s;
+  }
+  .chip:hover { border-color: var(--accent); }
+  .chip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .chip.on { border-color: var(--green); background: rgba(82,201,138,0.12); }
   .chip.off { opacity: 0.55; }
@@ -654,8 +666,10 @@
     var bar = document.getElementById("participants-bar");
     bar.innerHTML = "";
     (state.participants || []).forEach(function (p) {
-      var chip = document.createElement("div");
+      var chip = document.createElement("button");
+      chip.type = "button";
       chip.className = "chip " + (p.enabled ? "on" : "off");
+      chip.setAttribute("aria-pressed", p.enabled ? "true" : "false");
       chip.innerHTML = '<span class="dot"></span><span>' + escapeHtml(p.name) + '</span><span class="adapter-tag">' + escapeHtml(p.adapter) + '</span>';
       chip.addEventListener("click", function () {
         apiPost("/api/toggle", { id: p.id, enabled: !p.enabled });
