@@ -645,6 +645,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const rootDir = path.join(__dirname, '..');
   const config = loadConfig(rootDir);
   const server = createServer({ config, stateDir: path.join(rootDir, 'state') });
+  server.on('error', (err) => {
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'EADDRINUSE') {
+      console.error(`ポート ${config.port} は使用中です。別の debate-board が起動していないか確認してください。`);
+      console.error(`  確認(Windows): Get-NetTCPConnection -LocalPort ${config.port} -State Listen`);
+      console.error(`  または config.json の "port" を変更して再起動してください。`);
+      process.exit(1);
+    }
+    throw err;
+  });
   server.listen(config.port, '127.0.0.1', () => {
     console.log(`debate-board listening on http://127.0.0.1:${config.port}`);
   });
