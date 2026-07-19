@@ -67,7 +67,32 @@
     z-index: 1000;
     box-shadow: var(--shadow);
   }
-  #mock-badge.show { display: block; }
+  #mock-badge.show { display: block; cursor: pointer; }
+
+  #toast {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--danger);
+    color: #fff;
+    font-size: 13px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    z-index: 1100;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  #toast.show { opacity: 1; }
+
+  #start-error {
+    color: var(--danger);
+    font-size: 12px;
+    margin-top: 8px;
+    min-height: 16px;
+  }
 
   header {
     background: var(--bg-panel);
@@ -300,7 +325,8 @@
 </head>
 <body>
 
-<div id="mock-badge">モックモード</div>
+<div id="mock-badge" title="クリックでサーバ再接続を試す">モックモード</div>
+<div id="toast"></div>
 
 <header>
   <h1>debate-board</h1>
@@ -379,6 +405,7 @@
     <input id="start-topic-input" type="text" maxlength="200" placeholder="例: きのこ vs たけのこ">
     <label>ラウンド数</label>
     <input id="start-rounds-input" type="number" min="1" max="20" value="4">
+    <div id="start-error"></div>
     <div class="modal-actions">
       <button id="start-modal-cancel">キャンセル</button>
       <button id="start-modal-ok" class="primary">開始する</button>
@@ -439,14 +466,34 @@
   var myParticipantId = null; // human視点として扱う参加者id（モック/実運用共通で "human" 系を推定）
   var draggedCardId = null;
   var eventSource = null;
+  var sseDown = false; // SSE切断中フラグ（ステータス表示を「再接続中」に）
+  var noteDirty = false; // NOTE下書きが未保存
+  var noteSaveTimer = null;
+  var dragJustEnded = false; // ドラッグ直後のclick抑制フラグ
+  var toastTimer = null;
 
   function log() {
     // モック時の擬似POSTログ
     console.log.apply(console, ["[mock-api]"].concat(Array.prototype.slice.call(arguments)));
   }
 
+  function showToast(msg) {
+    var t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove("show"); }, 4000);
+  }
+
+  function isValidState(s) {
+    return !!(s && s.board && s.board.meta && Array.isArray(s.participants));
+  }
+
   // ------------------------------------------------------------------
-  // API 呼び出し（実サーバ優先、失敗時はモックへフォールバック）
+  // API 呼び出し
+  //  - mockモード: ローカルstateに適用して即描画
+  //  - 実モード: 成功応答は /api/state と同形 → stateを置換して即描画
+  //              失敗時はトースト表示＋/api/state再取得のみ（ローカル偽適用しない）
   // ------------------------------------------------------------------
   function apiPost(path, body) {
     if (MOCK) {
@@ -460,12 +507,22 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body || {})
     }).then(function (res) {
-      if (!res.ok) throw new Error("request failed: " + path);
-      return res.json().catch(function () { return {}; });
+      if (!res.ok) throw new Error("HTTP " + res.status + " " + path);
+      return res.json().catch(function () { return null; });
+    }).then(function (data) {
+      if (isValidState(data)) {
+        state = data;
+        myParticipantId = detectMyParticipantId();
+        render();
+      }
+      return { ok: true, data: data };
     }).catch(function (err) {
-      console.error("API error, falling back to mock behavior for this action:", err);
-      applyMockPost(path, body);
-      render();
+      console.error("API error:", err);
+      showToast("通信エラー: " + path);
+      fetchState().then(function (s) {
+        state = s;
+        render();
+      }).catch(function () { /* サーバダウン中は現状表示を維持 */ });
       return { ok: false, error: String(err) };
     });
   }
@@ -474,9 +531,16 @@
     if (MOCK) {
       return Promise.resolve(state);
     }
+    return fetchRealState();
+  }
+
+  function fetchRealState() {
     return fetch("/api/state").then(function (res) {
       if (!res.ok) throw new Error("state fetch failed");
       return res.json();
+    }).then(function (s) {
+      if (!isValidState(s)) throw new Error("invalid state shape (board/participants欠落)");
+      return s;
     });
   }
 
@@ -490,9 +554,22 @@
   function applyMockPost(path, body) {
     body = body || {};
     if (path === "/api/start") {
+      // ボード初期化（サンプルデータをリセット）
       state.board.meta.topic = body.topic || state.board.meta.topic;
       state.board.meta.round = 1;
       state.board.meta.status = "running";
+      state.board.meta.maxRounds = body.maxRounds || 4;
+      state.board.cards = [];
+      state.board.summary = null;
+      state.transcript = [];
+      state.awaitingHuman = null;
+      Object.keys(state.board.notes || {}).forEach(function (k) {
+        state.board.notes[k] = "";
+      });
+    } else if (path === "/api/pause") {
+      var cur = state.board.meta.status;
+      if (cur === "running") state.board.meta.status = "paused";
+      else if (cur === "paused") state.board.meta.status = "running";
     } else if (path === "/api/toggle") {
       var p = state.participants.find(function (x) { return x.id === body.id; });
       if (p) p.enabled = !!body.enabled;
@@ -556,10 +633,15 @@
     var meta = state.board.meta || {};
     document.getElementById("topic-display").textContent = meta.topic || "お題未設定";
     document.getElementById("round-display").textContent = "ラウンド " + (meta.round != null ? meta.round : "-");
-    var st = statusLabel(meta.status);
     var statusEl = document.getElementById("status-display");
-    statusEl.textContent = st.text;
-    statusEl.className = st.cls;
+    if (sseDown) {
+      statusEl.textContent = "再接続中…";
+      statusEl.className = "status-paused";
+    } else {
+      var st = statusLabel(meta.status);
+      statusEl.textContent = st.text;
+      statusEl.className = st.cls;
+    }
 
     renderParticipants();
     renderBoard();
@@ -617,8 +699,12 @@
     el.addEventListener("dragend", function () {
       el.classList.remove("dragging");
       draggedCardId = null;
+      // ドラッグ直後のclickで編集モーダルが開くのを1回だけ抑制
+      dragJustEnded = true;
+      setTimeout(function () { dragJustEnded = false; }, 300);
     });
-    el.addEventListener("click", function (e) {
+    el.addEventListener("click", function () {
+      if (dragJustEnded) { dragJustEnded = false; return; }
       openCardModal(card);
     });
     return el;
@@ -648,6 +734,14 @@
 
   function renderTabContent() {
     var content = document.getElementById("tab-content");
+    if (activeSideTab !== "transcript") {
+      // NOTEタブ編集中（フォーカス中 or 未保存下書きあり）はtextareaを再マウントしない
+      var existing = document.getElementById("note-textarea");
+      if (existing && existing.dataset.pid === activeSideTab &&
+          (document.activeElement === existing || noteDirty)) {
+        return;
+      }
+    }
     content.innerHTML = "";
     if (activeSideTab === "transcript") {
       var list = state.transcript || [];
@@ -666,7 +760,8 @@
           '<div class="transcript-body"></div>';
         el.querySelector(".transcript-head span").textContent = entry.name || entry.participantId || "?";
         el.querySelector(".transcript-round").textContent = "R" + entry.round;
-        el.querySelector(".transcript-body").textContent = entry.text || "";
+        el.querySelector(".transcript-body").textContent =
+          entry.text != null ? entry.text : (entry.utterance || "");
         content.appendChild(el);
       });
       content.scrollTop = content.scrollHeight;
@@ -679,6 +774,7 @@
       wrap.id = "note-area";
       var textarea = document.createElement("textarea");
       textarea.id = "note-textarea";
+      textarea.dataset.pid = pid;
       textarea.value = noteText;
       textarea.readOnly = !editable;
       if (!editable) textarea.style.opacity = "0.7";
@@ -690,11 +786,17 @@
       content.appendChild(wrap);
 
       if (editable) {
-        var saveTimer = null;
+        // 再マウント時に旧タイマーがdetached要素を指さないようクリア
+        clearTimeout(noteSaveTimer);
+        noteDirty = false;
         textarea.addEventListener("input", function () {
-          clearTimeout(saveTimer);
-          saveTimer = setTimeout(function () {
-            apiPost("/api/note", { text: textarea.value });
+          noteDirty = true;
+          clearTimeout(noteSaveTimer);
+          noteSaveTimer = setTimeout(function () {
+            var val = textarea.value;
+            apiPost("/api/note", { text: val }).then(function (r) {
+              if (r && r.ok) noteDirty = false;
+            });
           }, 500);
         });
       }
@@ -729,7 +831,9 @@
       e.dataTransfer.dropEffect = "move";
       laneEl.classList.add("drag-over");
     });
-    laneEl.addEventListener("dragleave", function () {
+    laneEl.addEventListener("dragleave", function (e) {
+      // レーン内の子要素への移動では消さない（ハイライトちらつき防止）
+      if (e.relatedTarget && laneEl.contains(e.relatedTarget)) return;
       laneEl.classList.remove("drag-over");
     });
     laneEl.addEventListener("drop", function (e) {
@@ -811,6 +915,7 @@
   document.getElementById("btn-start").addEventListener("click", function () {
     document.getElementById("start-topic-input").value = (state && state.board.meta.topic) || "";
     document.getElementById("start-rounds-input").value = 4;
+    document.getElementById("start-error").textContent = "";
     document.getElementById("start-modal").classList.add("show");
   });
   document.getElementById("start-modal-cancel").addEventListener("click", function () {
@@ -822,7 +927,17 @@
   document.getElementById("start-modal-ok").addEventListener("click", function () {
     var topic = document.getElementById("start-topic-input").value.trim();
     var rounds = parseInt(document.getElementById("start-rounds-input").value, 10) || 4;
-    if (!topic) { document.getElementById("start-topic-input").focus(); return; }
+    var errEl = document.getElementById("start-error");
+    if (!topic) {
+      errEl.textContent = "お題を入力してください。";
+      document.getElementById("start-topic-input").focus();
+      return;
+    }
+    var enabledCount = ((state && state.participants) || []).filter(function (p) { return p.enabled; }).length;
+    if (enabledCount < 2) {
+      errEl.textContent = "ONの参加者が2人未満のため開始できません。";
+      return;
+    }
     apiPost("/api/start", { topic: topic, maxRounds: rounds });
     document.getElementById("start-modal").classList.remove("show");
   });
@@ -856,8 +971,19 @@
   // ------------------------------------------------------------------
   function connectEvents() {
     if (MOCK || typeof EventSource === "undefined") return;
+    // 多重呼び出しガード: 既存接続は閉じてから張り直す
+    if (eventSource) {
+      try { eventSource.close(); } catch (err) {}
+      eventSource = null;
+    }
     try {
       eventSource = new EventSource("/api/events");
+      eventSource.onopen = function () {
+        if (sseDown) {
+          sseDown = false;
+          render();
+        }
+      };
       eventSource.onmessage = function (e) {
         var msg;
         try { msg = JSON.parse(e.data); } catch (err) { return; }
@@ -876,7 +1002,13 @@
         }
       };
       eventSource.onerror = function () {
-        // 接続断はブラウザが自動再接続を試みる。ここでは何もしない
+        // ブラウザが自動再接続を試みる間、ステータスを「再接続中」に
+        if (!sseDown) {
+          sseDown = true;
+          var statusEl = document.getElementById("status-display");
+          statusEl.textContent = "再接続中…";
+          statusEl.className = "status-paused";
+        }
       };
     } catch (err) {
       console.error("SSE connect failed", err);
@@ -891,6 +1023,22 @@
     var humanP = state.participants.find(function (p) { return p.adapter === "human"; });
     return humanP ? humanP.id : null;
   }
+
+  // モックバッジクリックで実サーバへの復帰を試す
+  document.getElementById("mock-badge").addEventListener("click", function () {
+    fetchRealState().then(function (s) {
+      MOCK = false;
+      sseDown = false;
+      state = s;
+      myParticipantId = detectMyParticipantId();
+      document.getElementById("mock-badge").classList.remove("show");
+      render();
+      connectEvents();
+      showToast("サーバに接続しました");
+    }).catch(function () {
+      showToast("サーバに接続できません（モックモード継続）");
+    });
+  });
 
   function init() {
     fetchState().then(function (s) {
