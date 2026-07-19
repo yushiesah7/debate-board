@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { createDebate, loadDebate } from '../src/state.mjs';
+import { createDebate, loadDebate, saveBoard, appendTranscript, loadTranscript } from '../src/state.mjs';
 import { runDebate } from '../src/engine.mjs';
 
 const TOPIC = 'きのこ vs たけのこ';
@@ -55,6 +55,7 @@ test('4ラウンド完走する', async () => {
 
   assert.equal(result.meta.round, 4);
   assert.equal(result.meta.status, 'ended');
+  assert.equal(result.meta.endedBy, 'maxRounds');
 
   const saved = loadDebate(stateDir, board.meta.id);
   assert.equal(saved.meta.round, 4);
@@ -163,6 +164,7 @@ test('ONの全AIが同一ラウンドでpassすると早期終了する', async 
   await runDebate({ stateDir, board, adapters });
 
   assert.equal(board.meta.round, 1);
+  assert.equal(board.meta.endedBy, 'allPass');
 });
 
 test('speakがrejectしたらpass扱いで続行する', async () => {
@@ -222,4 +224,201 @@ test('シンセシスの結果がboard.summaryに入る', async () => {
   assert.equal(result.summary, 'まとめ: 結論が出ました');
   const saved = loadDebate(stateDir, board.meta.id);
   assert.equal(saved.summary, 'まとめ: 結論が出ました');
+});
+
+test('再開時にtranscriptからhistoryが復元される（未完ラウンドは頭からやり直し）', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({ maxRounds: 2 }));
+
+  // 前プロセスの実行結果を再現: ラウンド1完了＋ラウンド2の途中（aだけ発言）でクラッシュした体
+  appendTranscript(stateDir, board.meta.id, {
+    round: 1, participantId: 'a', utterance: '復元テスト発言A', pass: false, cardOps: [], warnings: [],
+  });
+  appendTranscript(stateDir, board.meta.id, {
+    round: 1, participantId: 'b', utterance: '復元テスト発言B', pass: false, cardOps: [], warnings: [],
+  });
+  appendTranscript(stateDir, board.meta.id, {
+    round: 2, participantId: 'a', utterance: 'クラッシュ前の中途発言', pass: false, cardOps: [], warnings: [],
+  });
+  board.meta.round = 1; // ラウンド1のみ完了扱い
+  saveBoard(stateDir, board);
+
+  const reloaded = loadDebate(stateDir, board.meta.id);
+  const seen = [];
+  const adapters = {
+    a: {
+      async speak(ctx) {
+        if (ctx.round !== undefined) seen.push(ctx.recentTranscript);
+        return { utterance: '再開後の発言', cardOps: [], pass: true };
+      },
+    },
+    b: { async speak() { return { utterance: '', cardOps: [], pass: true }; } },
+  };
+
+  await runDebate({ stateDir, board: reloaded, adapters });
+
+  // 再開はラウンド2から（未完ラウンドを頭からやり直す）
+  assert.equal(seen.length, 1);
+  const recent = seen[0];
+  // ラウンド1の発言がファイルから復元されて文脈に入っている
+  assert.ok(recent.some((e) => e.round === 1 && e.utterance === '復元テスト発言A'));
+  // 未完ラウンド2の中途エントリは文脈に含まれない
+  assert.ok(!recent.some((e) => e.utterance === 'クラッシュ前の中途発言'));
+});
+
+test('recentTranscriptは直近2ラウンドの窓（round-2以降）', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({ maxRounds: 4 }));
+
+  let round4Recent = null;
+  const adapters = {
+    a: {
+      async speak(ctx) {
+        if (ctx.round === 4) round4Recent = ctx.recentTranscript;
+        return { utterance: `AのR${ctx.round}`, cardOps: [], pass: false };
+      },
+    },
+    b: alwaysSpeakAdapter('B'),
+  };
+
+  await runDebate({ stateDir, board, adapters });
+
+  assert.ok(round4Recent !== null);
+  const rounds = round4Recent.map((e) => e.round);
+  assert.ok(rounds.every((r) => r >= 2), `ラウンド1が混入: ${rounds}`);
+  assert.ok(rounds.includes(2));
+  assert.ok(rounds.includes(3));
+});
+
+test('status=endedのboardを渡すと即no-op return', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig());
+  board.meta.status = 'ended';
+  saveBoard(stateDir, board);
+
+  let called = 0;
+  const adapters = {
+    a: { async speak() { called += 1; return { pass: true }; } },
+    b: { async speak() { called += 1; return { pass: true }; } },
+  };
+  const events = [];
+
+  const result = await runDebate({ stateDir, board, adapters, onEvent: (e) => events.push(e) });
+
+  assert.equal(called, 0);
+  assert.equal(events.length, 0);
+  assert.equal(result.meta.status, 'ended');
+});
+
+test('onEventが例外を投げても進行が止まらない', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({ maxRounds: 1 }));
+
+  const adapters = {
+    a: alwaysSpeakAdapter('A'),
+    b: alwaysSpeakAdapter('B'),
+  };
+
+  const result = await runDebate({
+    stateDir,
+    board,
+    adapters,
+    onEvent: () => {
+      throw new Error('GUI側の例外');
+    },
+  });
+
+  assert.equal(result.meta.status, 'ended');
+  assert.equal(result.meta.round, 1);
+});
+
+test('enabledな参加者が2人未満なら即終了（endedBy=noParticipants）', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, {
+    maxRounds: 4,
+    participants: [
+      { id: 'a', name: 'A', adapter: 'claude', enabled: true },
+      { id: 'b', name: 'B', adapter: 'codex', enabled: false },
+    ],
+  });
+
+  let called = 0;
+  const adapters = {
+    a: { async speak() { called += 1; return { pass: true }; } },
+  };
+  const events = [];
+
+  const result = await runDebate({ stateDir, board, adapters, onEvent: (e) => events.push(e) });
+
+  assert.equal(called, 0);
+  assert.equal(result.meta.status, 'ended');
+  assert.equal(result.meta.endedBy, 'noParticipants');
+  assert.equal(result.summary, null);
+  assert.ok(events.some((e) => e.type === 'warning'));
+  assert.ok(events.some((e) => e.type === 'ended' && e.endedBy === 'noParticipants'));
+});
+
+test('シンセシス担当は配列順で最初のenabled＋adapter登録ありのnon-human', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, {
+    maxRounds: 1,
+    participants: [
+      { id: 'you', name: 'あなた', adapter: 'human', enabled: true },
+      { id: 'a', name: 'A', adapter: 'claude', enabled: true }, // adapter未登録
+      { id: 'b', name: 'B', adapter: 'codex', enabled: true },
+    ],
+  });
+
+  const adapters = {
+    you: { async speak() { return { utterance: '', cardOps: [], pass: true }; } },
+    // a は登録なし → ラウンド中はpass扱い、シンセシス担当にも選ばれない
+    b: {
+      async speak(ctx) {
+        if (ctx.transcriptTail !== undefined) {
+          return { summary: 'Bによる総括' };
+        }
+        return { utterance: '発言B', cardOps: [], pass: true };
+      },
+    },
+  };
+
+  const result = await runDebate({ stateDir, board, adapters });
+
+  assert.equal(result.summary, 'Bによる総括');
+});
+
+test('不正なTurnResult（utterance非string/cardOps非配列）はpass+errorに正規化される', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({ maxRounds: 1 }));
+
+  const adapters = {
+    a: { async speak() { return { utterance: 123, cardOps: [], pass: false }; } },
+    b: { async speak() { return { utterance: 'ok', cardOps: 'not-an-array', pass: false }; } },
+  };
+
+  await runDebate({ stateDir, board, adapters });
+
+  const { entries } = loadTranscript(stateDir, board.meta.id);
+  const aEntry = entries.find((e) => e.participantId === 'a');
+  const bEntry = entries.find((e) => e.participantId === 'b');
+  assert.equal(aEntry.pass, true);
+  assert.ok(aEntry.error.includes('utterance'));
+  assert.equal(bEntry.pass, true);
+  assert.ok(bEntry.error.includes('cardOps'));
+});
+
+test('loadTranscriptは壊れた行をskipしてwarningsに積む', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig());
+  appendTranscript(stateDir, board.meta.id, { round: 1, participantId: 'a', utterance: '正常行' });
+  fs.appendFileSync(
+    path.join(stateDir, board.meta.id, 'transcript.jsonl'),
+    '{ これはJSONではない\n',
+    'utf8'
+  );
+  appendTranscript(stateDir, board.meta.id, { round: 1, participantId: 'b', utterance: '正常行2' });
+
+  const { entries, warnings } = loadTranscript(stateDir, board.meta.id);
+  assert.equal(entries.length, 2);
+  assert.equal(warnings.length, 1);
 });

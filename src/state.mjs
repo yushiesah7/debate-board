@@ -7,7 +7,9 @@
  *
  * board.json の形:
  *   {
- *     meta: { id, topic, status, round, maxRounds, cardSeq, createdAt, updatedAt },
+ *     meta: { id, topic, status, round, maxRounds, cardSeq, createdAt, updatedAt, endedBy? },
+ *       - round は「完了したラウンド番号」（ラウンド完了時にのみ確定書き込みされる）
+ *       - endedBy は終了時のみ: "maxRounds" | "allPass" | "ending" | "noParticipants"
  *     participants: [{ id, name, adapter, model?, endpoint?, persona?, enabled, session? }, ...],
  *     cards: [{ id, lane, title, body, createdBy, updatedBy, updatedAt }, ...],
  *     notes: { [participantId]: string },
@@ -90,6 +92,8 @@ export function loadDebate(stateDir, debateId) {
 
 /**
  * board を board.json に保存する（updatedAt を更新）。
+ * 書き込みは原子的: 同ディレクトリの一時ファイルに書いてから renameSync で置き換える。
+ * 途中でクラッシュしても board.json が中途半端な内容になることはない。
  *
  * @param {string} stateDir
  * @param {object} board - board.meta.id を含んでいること
@@ -99,7 +103,10 @@ export function saveBoard(stateDir, board) {
   board.meta.updatedAt = new Date().toISOString();
   const dir = path.join(stateDir, board.meta.id);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'board.json'), JSON.stringify(board, null, 2), 'utf8');
+  const target = path.join(dir, 'board.json');
+  const tmp = path.join(dir, 'board.json.tmp');
+  fs.writeFileSync(tmp, JSON.stringify(board, null, 2), 'utf8');
+  fs.renameSync(tmp, target);
 }
 
 /**
@@ -107,13 +114,45 @@ export function saveBoard(stateDir, board) {
  *
  * @param {string} stateDir
  * @param {string} debateId
- * @param {object} entry - JSON化可能な任意オブジェクト（timestamp未設定なら付与する）
+ * @param {object} entry - JSON化可能な任意オブジェクト（entry.timestamp があればそれを尊重、なければ現在時刻を付与）
  * @returns {void}
  */
 export function appendTranscript(stateDir, debateId, entry) {
-  const record = { timestamp: new Date().toISOString(), ...entry };
+  const record = { ...entry, timestamp: entry.timestamp ?? new Date().toISOString() };
   const filePath = path.join(stateDir, debateId, 'transcript.jsonl');
   fs.appendFileSync(filePath, JSON.stringify(record) + '\n', 'utf8');
+}
+
+/**
+ * transcript.jsonl を行単位で読み込みパースする。
+ * 壊れた行（JSONとして不正な行）はスキップして warnings に行番号つきで積む。
+ * ファイルが存在しない・読めない場合は entries=[] + warning 1件を返す（例外は投げない）。
+ *
+ * @param {string} stateDir
+ * @param {string} debateId
+ * @returns {{entries: Array<object>, warnings: string[]}}
+ */
+export function loadTranscript(stateDir, debateId) {
+  const filePath = path.join(stateDir, debateId, 'transcript.jsonl');
+  let raw;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return { entries: [], warnings: ['transcript.jsonl を読み込めませんでした'] };
+  }
+  const entries = [];
+  const warnings = [];
+  const lines = raw.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line === '') continue;
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+      warnings.push(`transcript ${i + 1}行目がJSONとして不正なためスキップしました`);
+    }
+  }
+  return { entries, warnings };
 }
 
 /**
@@ -132,7 +171,15 @@ export function applyCardOps(board, cardOps, byId) {
   const ops = Array.isArray(cardOps) ? cardOps : [];
 
   for (const rawOp of ops) {
-    const op = rawOp && typeof rawOp === 'object' ? rawOp : {};
+    if (!rawOp || typeof rawOp !== 'object' || Array.isArray(rawOp)) {
+      warnings.push('cardOpがオブジェクトではありません');
+      continue;
+    }
+    const op = rawOp;
+    if (op.op === undefined) {
+      warnings.push('cardOpにopフィールドがありません');
+      continue;
+    }
     const now = new Date().toISOString();
 
     if (op.op === 'add') {
@@ -187,8 +234,24 @@ export function applyCardOps(board, cardOps, byId) {
         warnings.push(`edit: title/bodyのどちらも指定なし (cardId=${op.cardId})`);
         continue;
       }
-      if (op.title !== undefined) card.title = op.title;
-      if (op.body !== undefined) card.body = op.body;
+      let edited = false;
+      if (op.title !== undefined) {
+        if (typeof op.title === 'string') {
+          card.title = op.title;
+          edited = true;
+        } else {
+          warnings.push(`edit: titleがstringではありません (cardId=${op.cardId})`);
+        }
+      }
+      if (op.body !== undefined) {
+        if (typeof op.body === 'string') {
+          card.body = op.body;
+          edited = true;
+        } else {
+          warnings.push(`edit: bodyがstringではありません (cardId=${op.cardId})`);
+        }
+      }
+      if (!edited) continue;
       card.updatedBy = byId;
       card.updatedAt = now;
       applied.push({ op: 'edit', card });

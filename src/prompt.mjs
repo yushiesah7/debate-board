@@ -26,8 +26,9 @@ export function boardSummary(board) {
       lines.push('  (なし)');
     } else {
       for (const c of cards) {
-        const bodyLine = (c.body ?? '').split('\n')[0];
-        lines.push(`  - [${c.id}] ${c.title}: ${bodyLine}`);
+        const title = typeof c.title === 'string' ? c.title : '(無題)';
+        const bodyLine = typeof c.body === 'string' ? c.body.split('\n')[0] : '';
+        lines.push(`  - [${c.id}] ${title}: ${bodyLine}`);
       }
     }
   }
