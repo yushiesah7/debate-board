@@ -251,6 +251,99 @@ test('未知パスは404, 不正メソッドは405, 不正JSONは400', async (t)
   assert.equal(rBadJson.status, 400);
 });
 
+test('humanターン待機中のendは保留Promiseを即解決して速やかに終了する', async (t) => {
+  const { baseUrl, connectSSE: connect } = await startTestServer(t);
+  const sse = connect('/api/events');
+
+  await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 5 });
+  await waitFor(() => sse.events.some((e) => e.type === 'await-human'));
+
+  const endRes = await postJson(`${baseUrl}/api/end`, {});
+  assert.equal(endRes.status, 200);
+  assert.equal(endRes.body.awaitingHuman, null);
+
+  // humanタイムアウト(5分)を待たされることなく即座にendedになる
+  await waitFor(() => sse.events.some((e) => e.type === 'ended'), { timeoutMs: 3000 });
+  const finalState = await getJson(`${baseUrl}/api/state`);
+  assert.equal(finalState.body.board.meta.status, 'ended');
+  assert.equal(finalState.body.board.meta.endedBy, 'ending');
+});
+
+test('pause中のendでもhuman保留が解決され終了する', async (t) => {
+  const { baseUrl, connectSSE: connect } = await startTestServer(t);
+  const sse = connect('/api/events');
+
+  await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 5 });
+  await waitFor(() => sse.events.some((e) => e.type === 'await-human'));
+
+  const paused = await postJson(`${baseUrl}/api/pause`, {});
+  assert.equal(paused.body.board.meta.status, 'paused');
+
+  const endRes = await postJson(`${baseUrl}/api/end`, {});
+  assert.equal(endRes.status, 200);
+
+  await waitFor(() => sse.events.some((e) => e.type === 'ended'), { timeoutMs: 3000 });
+  const finalState = await getJson(`${baseUrl}/api/state`);
+  assert.equal(finalState.body.board.meta.status, 'ended');
+  assert.equal(finalState.body.board.meta.endedBy, 'ending');
+});
+
+test('マルチバイトUTF-8がチャンク境界で分断されても正しくパースされる', async (t) => {
+  const { baseUrl } = await startTestServer(t);
+  await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 5 });
+
+  const title = 'たけのこ派の勝利条件🍄';
+  const payload = Buffer.from(
+    JSON.stringify({ op: 'add', lane: 'discussing', title, body: '日本語本文テスト' }),
+    'utf8'
+  );
+  // マルチバイト文字の途中（「た」= 3バイトの2バイト目）で分割し、生チャンクとして送信する
+  const splitAt = payload.indexOf(Buffer.from('た', 'utf8')) + 1;
+  assert.ok(splitAt > 0, 'テスト前提: ペイロード内に「た」が存在すること');
+  const chunk1 = payload.subarray(0, splitAt);
+  const chunk2 = payload.subarray(splitAt);
+
+  const url = new URL(`${baseUrl}/api/card`);
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': payload.length,
+        },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (d) => (body += d));
+        res.on('end', () => {
+          try {
+            resolve({ status: res.statusCode, body: JSON.parse(body) });
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(chunk1);
+    // 2チャンク目を別tickで送り、サーバ側で確実に複数の'data'イベントに分かれるようにする
+    setTimeout(() => {
+      req.write(chunk2);
+      req.end();
+    }, 20);
+  });
+
+  assert.equal(result.status, 200);
+  const card = result.body.board.cards.find((c) => c.title === title);
+  assert.ok(card, 'マルチバイトタイトルのカードが化けずに保存されていること');
+  assert.equal(card.body, '日本語本文テスト');
+  assert.ok(!JSON.stringify(result.body.board.cards).includes('�'), '置換文字(U+FFFD)が混入していないこと');
+});
+
 test('サーバは静的にpublic/index.htmlを配信する', async (t) => {
   const { baseUrl } = await startTestServer(t);
   const res = await fetch(`${baseUrl}/`);

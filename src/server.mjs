@@ -45,12 +45,15 @@ function sleep(ms) {
  */
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
-    let data = '';
+    /** @type {Buffer[]} */
+    const chunks = [];
+    let total = 0;
     let tooBig = false;
     req.on('data', (chunk) => {
       if (tooBig) return;
-      data += chunk;
-      if (data.length > MAX_BODY_BYTES) {
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) {
         tooBig = true;
         reject(new Error('request body too large'));
       }
@@ -58,6 +61,9 @@ function readJsonBody(req) {
     req.on('error', (err) => reject(err));
     req.on('end', () => {
       if (tooBig) return;
+      // Buffer.concat後に一括デコード: chunkごとの暗黙toString()だと、マルチバイト
+      // UTF-8文字がチャンク境界で分断された場合に置換文字(U+FFFD)へ化けるため
+      const data = Buffer.concat(chunks).toString('utf8');
       if (data.trim() === '') {
         resolve({});
         return;
@@ -421,8 +427,12 @@ export function createServer({ config, adapters: injectedAdapters, stateDir = 's
     if (!currentBoard || currentBoard.meta.status === 'ended') {
       return sendError(res, 400, 'no debate to end');
     }
+    // pause中でも終了できるようstatusを直接'ending'へ（withPauseGateはpaused以外で解除される）
     currentBoard.meta.status = 'ending';
     saveBoard(stateDir, currentBoard);
+    // humanターン待機中なら保留Promiseをskip相当で即解決する。
+    // これをしないとエンジンがhumanタイムアウト（最大5分）までブロックし続ける
+    resolvePendingHuman({ skip: true });
     broadcast({ type: 'update' });
     return sendJson(res, 200, buildStateResponse());
   }
