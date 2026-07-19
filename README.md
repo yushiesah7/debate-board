@@ -2,23 +2,49 @@
 
 複数のAIと人間が同じボードで議論して、結論をカンバン（✅決定／💬議論中／⏸保留）に残すローカルアプリ。
 
+> 📖 **図解つきガイドは [README.html](README.html)** — クローンしてブラウザで開くと読みやすい版が見られます。
+
 - 進行はNodeスクリプト（アルゴリズム）、AIはヘッドレスCLI（Claude Code / Codex / Grok）またはローカルLLM（Ollama / OpenAI互換API）
 - **議論の中身は一切外に出ない**: 発言・カード・議事録はすべて `state/`（git管理外）に保存。サーバは 127.0.0.1 のみ
 - **APIキー不要**: CLI系は各CLIのローカル認証を流用（コードに秘密情報なし）
 - **依存パッケージゼロ**: Node組み込みのみ。`npm install` 不要
 
-## 使い方（M2以降）
+## 必要なもの
 
-```
-cp config.example.json config.json   # 参加者を編集（人数・種類は自由）
+- **Node.js 20以上**（必須はこれだけ）
+- 参加させたいAIのCLI（任意・使う分だけ）: `claude` / `codex` / `grok` — 各サブスク認証を流用
+- ローカルLLM派: Ollama または OpenAI互換サーバ（LM Studio / llama.cpp server / vLLM）
+
+## 起動方法（GUI）
+
+```bash
+git clone https://github.com/yushiesah7/debate-board.git
+cd debate-board
+cp config.example.json config.json   # Windowsは copy
 node src/server.mjs
-# → http://127.0.0.1:8787
+# → ブラウザで http://127.0.0.1:8787
 ```
 
-参加者はトグルでON/OFF。ONの参加者だけでラウンドが回り、終了時に結論サマリが残る。
+お題を入力して「開始」すると、ONの参加者が順番に発言し、カードを動かしながら議論します。
+「あなた」をONにすれば自分のターンで発言／スキップできます。終了時に結論サマリが表示されます。
+
+※ サーバ無しで `public/index.html` を直接開くとモックモード（サンプルデータでUIだけ試せる）。
+
+## 起動方法（ターミナル / GUI無し）
+
+```bash
+node src/cli.mjs "きのこの山 vs たけのこの里、どちらが至高か" 3
+```
+
+## 参加者のカスタマイズ
+
+`config.json` の `participants` を編集（人数・種類は自由、ターン順=配列順）。
+アダプタ: `claude` / `codex` / `grok` / `ollama` / `openai-compat` / `human`（1人まで）。
+詳細は [README.html](README.html) または [docs/SPEC.md](docs/SPEC.md) §2 を参照。
 
 ## ドキュメント
 
+- 使い方ガイド: [README.html](README.html)
 - 仕様: [docs/SPEC.md](docs/SPEC.md)
 - 構成: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - タスク: [docs/TASKS.md](docs/TASKS.md)

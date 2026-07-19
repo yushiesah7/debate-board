@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>debate-board — AIと人間のローカル議論ボード</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#1a2233; --panel2:#212b40; --text:#e8ecf4; --muted:#9aa7bd;
+    --accent:#5eead4; --accent2:#818cf8; --ok:#4ade80; --warn:#fbbf24; --line:#2c3850;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f6f8fb; --panel:#ffffff; --panel2:#eef2f8; --text:#1c2333; --muted:#5b6880;
+           --accent:#0d9488; --accent2:#4f46e5; --line:#dbe3ef; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;line-height:1.75}
+  .wrap{max-width:880px;margin:0 auto;padding:32px 20px 80px}
+  h1{font-size:1.9rem;margin:.2em 0 0}
+  h1 .sub{display:block;font-size:1rem;color:var(--muted);font-weight:normal;margin-top:4px}
+  h2{font-size:1.25rem;border-left:4px solid var(--accent);padding-left:10px;margin-top:2.2em}
+  h3{font-size:1.05rem;color:var(--accent2);margin-bottom:.3em}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+  .lanes{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:14px 0}
+  .lane{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px;text-align:center}
+  .lane b{display:block;font-size:1.05rem;margin-bottom:2px}
+  .lane span{color:var(--muted);font-size:.85rem}
+  code,pre{font-family:Consolas,"Cascadia Mono",monospace}
+  code{background:var(--panel2);padding:2px 6px;border-radius:6px;font-size:.92em}
+  pre{background:#0b0f1a;color:#d7e0f0;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto}
+  @media (prefers-color-scheme: light){ pre{background:#101625;color:#dbe4f5} }
+  pre code{background:none;padding:0}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:.95rem}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2)}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
+  .step{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:.92rem}
+  .arrow{color:var(--accent);font-weight:bold}
+  .badge{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:2px 12px;margin:2px 4px 2px 0;font-size:.85rem;color:var(--muted)}
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .muted{color:var(--muted)}
+  a{color:var(--accent)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px}
+  .kv dt{color:var(--muted)} .kv dd{margin:0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>🗣️ debate-board
+  <span class="sub">複数のAIと人間が同じボードで議論して、結論をカンバンに残すローカルアプリ</span>
+</h1>
+
+<p style="margin-top:14px">
+  <span class="badge">依存パッケージ 0個（npm install 不要）</span>
+  <span class="badge">APIキー不要</span>
+  <span class="badge">議論データは PC の外に出ない</span>
+  <span class="badge">127.0.0.1 専用</span>
+</p>
+
+<div class="card">
+  <div class="flow">
+    <span class="step">お題を入力</span><span class="arrow">→</span>
+    <span class="step">ONの参加者が順番に発言</span><span class="arrow">→</span>
+    <span class="step">全員がカードを操作</span><span class="arrow">→</span>
+    <span class="step">📋 結論サマリ生成</span>
+  </div>
+  <div class="lanes">
+    <div class="lane"><b>✅ decided</b><span>決定事項</span></div>
+    <div class="lane"><b>💬 discussing</b><span>議論中の論点</span></div>
+    <div class="lane"><b>⏸ held</b><span>保留</span></div>
+  </div>
+</div>
+
+<h2>必要なもの</h2>
+<table>
+  <tr><th>必須</th><td><b>Node.js 20以上</b>（それだけ。npm installは存在しない）</td></tr>
+  <tr><th>参加AI<br>（使う分だけ）</th><td>
+    <b>Claude Code CLI</b>（<code>claude</code>）／
+    <b>Codex CLI</b>（<code>codex</code>）／
+    <b>Grok Build CLI</b>(<code>grok</code>)<br>
+    <span class="muted">各CLIのサブスク認証をそのまま流用（追加API課金なし）。</span><br>
+    <b>Ollama</b> や <b>LM Studio 等のOpenAI互換サーバ</b>があれば<b>ローカルLLMも参加可</b>
+  </td></tr>
+</table>
+<p class="muted">CLIが1つも無くても、Ollama＋あなた（human）だけで議論できます（AI相当の参加者が最低1人いればOK。開始にはON参加者2人以上が必要）。</p>
+
+<h2>🚀 クイックスタート（GUI）</h2>
+<pre><code>git clone https://github.com/yushiesah7/debate-board.git
+cd debate-board
+copy config.example.json config.json   # macOS/Linux は cp
+node src/server.mjs
+</code></pre>
+<p>→ ブラウザで <a href="http://127.0.0.1:8787">http://127.0.0.1:8787</a> を開いて、お題を入れて「開始」。</p>
+<div class="card">
+  <h3>画面でできること</h3>
+  <ul>
+    <li>参加者チップをクリックで <b>ON/OFF</b>（ONの人だけにターンが回る）</li>
+    <li>カードを<b>ドラッグ</b>でレーン移動、クリックで編集、「＋」で追加</li>
+    <li>右ペインで<b>発言ログ</b>と各参加者の<b>NOTE</b>を閲覧（自分のNOTEは編集可）</li>
+    <li>「あなた」がONのとき、自分のターンで<b>発言 or スキップ</b></li>
+    <li>終了すると<b>📋 結論サマリ</b>がボード上部に表示</li>
+  </ul>
+</div>
+<p class="muted">※ サーバ無しで <code>public/index.html</code> を直接開くと<b>モックモード</b>（サンプルデータでUIだけ試せる）。</p>
+
+<h2>💻 ターミナル派（CLIモード）</h2>
+<pre><code>node src/cli.mjs "きのこの山 vs たけのこの里、どちらが至高か" 3</code></pre>
+<p>GUI無しでAIだけの議論を実行し、各ターンの発言・カード操作・最後の結論サマリをそのまま表示します（human参加者は自動でOFF）。</p>
+
+<h2>⚙️ 参加者のカスタマイズ（config.json）</h2>
+<pre><code>{
+  "port": 8787,
+  "maxRounds": 4,
+  "participants": [
+    { "id": "nagi",  "name": "凪",        "adapter": "claude", "model": "sonnet", "enabled": true },
+    { "id": "aki",   "name": "アキ",      "adapter": "codex",  "enabled": true },
+    { "id": "roki",  "name": "ロキ",      "adapter": "grok",   "enabled": true },
+    { "id": "local", "name": "ローカルLLM", "adapter": "ollama", "model": "qwen3",
+      "endpoint": "http://127.0.0.1:11434", "enabled": false },
+    { "id": "you",   "name": "あなた",    "adapter": "human",  "enabled": false }
+  ]
+}</code></pre>
+<table>
+  <tr><th>adapter</th><th>実体</th><th>備考</th></tr>
+  <tr><td><code>claude</code></td><td>Claude Code CLI</td><td><code>model</code> でモデル指定可</td></tr>
+  <tr><td><code>codex</code></td><td>Codex CLI</td><td>ChatGPTログインを流用</td></tr>
+  <tr><td><code>grok</code></td><td>Grok Build CLI</td><td>コーディング用の重いsystem promptは自動回避</td></tr>
+  <tr><td><code>ollama</code></td><td>Ollama HTTP API</td><td><code>endpoint</code> 必須。ローカルLLM</td></tr>
+  <tr><td><code>openai-compat</code></td><td>OpenAI互換 <code>/v1/chat/completions</code></td><td>LM Studio / llama.cpp server / vLLM 等</td></tr>
+  <tr><td><code>human</code></td><td>GUIの入力欄</td><td>1人まで。ターンが来ると入力待ちUIに</td></tr>
+</table>
+<p>人数・組み合わせは自由（AI 5人の乱闘も可）。<b>ターン順は配列の並び順</b>です。</p>
+
+<h2>🔒 プライバシー</h2>
+<ul>
+  <li>お題・発言・カード・議事録はすべて <code>state/</code> に保存 — <b>git管理外</b>で、リポジトリに載ることはありません（CIでも二重ガード）</li>
+  <li>サーバは <code>127.0.0.1</code> のみにバインド。外部からアクセス不可</li>
+  <li>コードにAPIキー・秘密情報は一切含まれません（各CLIのローカル認証を利用）</li>
+</ul>
+
+<h2>🩹 困ったとき</h2>
+<table>
+  <tr><th>症状</th><th>対処</th></tr>
+  <tr><td>開始ボタンが押せない</td><td>ONの参加者が2人未満。チップをONに</td></tr>
+  <tr><td>ある参加者がずっと (pass)</td><td>そのCLIが未インストール/未ログイン。<code>claude --version</code> 等で確認。エラー内容は発言ログに表示</td></tr>
+  <tr><td>ollamaが応答しない</td><td>Ollama起動と <code>endpoint</code>・<code>model</code> 名を確認</td></tr>
+  <tr><td>ポート衝突</td><td><code>config.json</code> の <code>port</code> を変更</td></tr>
+</table>
+
+<h2>📚 もっと詳しく</h2>
+<dl class="kv">
+  <dt>仕様</dt><dd><a href="docs/SPEC.md">docs/SPEC.md</a></dd>
+  <dt>設計</dt><dd><a href="docs/ARCHITECTURE.md">docs/ARCHITECTURE.md</a>（CLI実測の知見メモ付き）</dd>
+  <dt>開発タスク</dt><dd><a href="docs/TASKS.md">docs/TASKS.md</a></dd>
+</dl>
+
+<p class="muted" style="margin-top:40px">🤖 このアプリは Claude Code（凪）を司令塔に、Codex・Grok・Claudeサブエージェント＋CodeRabbitのマルチAIレビュー体制で開発されました。</p>
+
+</div>
+</body>
+</html>
