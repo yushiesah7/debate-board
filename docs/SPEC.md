@@ -101,7 +101,24 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 - 3レーンかんばん（ドラッグでlane移動、クリックで編集）
 - 右ペイン: transcript（ライブ）／各自NOTEタブ
 - humanターン時: 入力欄＋発言/スキップボタン
-- 更新はSSE（Server-Sent Events）。REST: /api/start, /api/toggle, /api/card, /api/say, /api/end
+- 議論終了時: summaryパネル表示（M2ではT5スコープ）
+
+### API契約（GUI⇔server 正式版）
+
+| メソッド/パス | ボディ / 応答 |
+|---|---|
+| GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled}], awaitingHuman:null\|{participantId}, transcript:[{round,speaker,text,ts}]}` |
+| SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"ended"}` |
+| POST `/api/start` | `{topic, maxRounds}`（ONが2人未満なら400） |
+| POST `/api/pause` | `{}`（トグル: running⇄paused） |
+| POST `/api/end` | `{}` |
+| POST `/api/toggle` | `{id, enabled}` |
+| POST `/api/card` | `{op:"add"\|"move"\|"edit", cardId?, lane?, title?, body?}`（編集でレーン変更する場合はedit→moveの2リクエスト可） |
+| POST `/api/say` | `{text}`（awaitingHuman時のみ有効） |
+| POST `/api/skip` | `{}`（同上） |
+| POST `/api/note` | `{text}`（human参加者自身のNOTE更新） |
+
+- POST成功応答は最新の `/api/state` と同形を返す（クライアントは即時反映し、SSEは補助通知とする）
 
 ## 9. 非機能・セキュリティ・プライバシー
 
