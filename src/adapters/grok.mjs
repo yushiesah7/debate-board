@@ -5,7 +5,9 @@
  *   grok --prompt-file <tmp/prompt.txt> --json-schema <inline JSON>
  *        --output-format json --system-prompt-override <persona>
  *        --cwd <tmpdir> --no-memory --disable-web-search
- *        --permission-mode dontAsk --max-turns 3
+ *        --permission-mode <plan|bypassPermissions> --max-turns <6|10>
+ * (permission mode / max turns are driven by the participant's pcAccess
+ * config; see buildGrokArgs.)
  * The prompt is written to a temp file and passed via `--prompt-file`
  * (verified real flag in `grok --help`) instead of an argv literal — this
  * avoids the Windows command-line length limit for long board prompts.
@@ -30,10 +32,17 @@ import {
 
 /**
  * Pure argv builder — unit-testable without spawning anything.
- * @param {{promptFilePath:string, schemaJson:object, persona?:string, cwd:string}} opts
+ *
+ * pcAccess (config, default "read"):
+ * - "read": `--permission-mode plan` (read-only tools; the AI can only look
+ *   at the PC) with `--max-turns 6` to leave room for read-tool round trips.
+ * - "full": `--permission-mode bypassPermissions` (read/write/execute without
+ *   approval — explicit opt-in, at the user's own risk) with `--max-turns 10`.
+ * @param {{promptFilePath:string, schemaJson:object, persona?:string, cwd:string, pcAccess?:"read"|"full"}} opts
  * @returns {string[]}
  */
-export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd }) {
+export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd, pcAccess }) {
+  const full = pcAccess === "full";
   return [
     "--prompt-file",
     promptFilePath,
@@ -48,9 +57,9 @@ export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd }) {
     "--no-memory",
     "--disable-web-search",
     "--permission-mode",
-    "dontAsk",
+    full ? "bypassPermissions" : "plan",
     "--max-turns",
-    "3",
+    full ? "10" : "6",
   ];
 }
 
@@ -93,6 +102,7 @@ export async function speak(ctx) {
           schemaJson,
           persona: participant?.persona,
           cwd,
+          pcAccess: participant?.pcAccess,
         });
         const result = await runProcess({
           command,

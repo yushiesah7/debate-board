@@ -28,10 +28,15 @@ import {
  * Pure argv builder — unit-testable without spawning anything.
  * `model` maps to `codex exec -m/--model <MODEL>` (verified in
  * `codex exec --help`, codex 0.144.x) and is omitted when not configured.
- * @param {{schemaFilePath:string, cwd:string, model?:string}} opts
+ *
+ * pcAccess (config, default "read"):
+ * - "read": adds `--sandbox read-only` — the AI can only look at the PC.
+ * - "full": adds `--sandbox danger-full-access` — read/write/execute without
+ *   sandboxing. Explicit opt-in, at the user's own risk.
+ * @param {{schemaFilePath:string, cwd:string, model?:string, pcAccess?:"read"|"full"}} opts
  * @returns {string[]}
  */
-export function buildCodexArgs({ schemaFilePath, cwd, model }) {
+export function buildCodexArgs({ schemaFilePath, cwd, model, pcAccess }) {
   const args = [
     "exec",
     "--json",
@@ -47,6 +52,8 @@ export function buildCodexArgs({ schemaFilePath, cwd, model }) {
     // quoting needed — spawn(shell:false) passes the literal string through.
     "-c",
     "mcp_servers={}",
+    "--sandbox",
+    pcAccess === "full" ? "danger-full-access" : "read-only",
   ];
   if (model) args.push("-m", model);
   return args;
@@ -203,7 +210,12 @@ export async function speak(ctx) {
         const schemaFilePath = path.join(cwd, "output-schema.json");
         fs.writeFileSync(schemaFilePath, JSON.stringify(schemaJson ?? {}, null, 2), "utf8");
 
-        const args = buildCodexArgs({ schemaFilePath, cwd, model: participant?.model });
+        const args = buildCodexArgs({
+          schemaFilePath,
+          cwd,
+          model: participant?.model,
+          pcAccess: participant?.pcAccess,
+        });
         const result = await runProcess({
           command,
           args,

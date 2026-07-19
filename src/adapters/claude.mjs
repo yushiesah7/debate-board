@@ -19,13 +19,24 @@ import {
 
 /**
  * Pure argv builder — unit-testable without spawning anything.
- * @param {{model?:string, persona?:string}} participant
+ *
+ * pcAccess (config, default "read"):
+ * - "read": no extra flags. `claude -p` by default allows read-style tools
+ *   but write/execute tools cannot be approved headlessly, so the AI can
+ *   only look at the PC.
+ * - "full": adds `--permission-mode bypassPermissions` — read/write/execute
+ *   without approval. Explicit opt-in, at the user's own risk.
+ * @param {{model?:string, persona?:string, pcAccess?:"read"|"full"}} participant
  * @returns {string[]}
  */
 export function buildClaudeArgs(participant) {
   const model = participant?.model ?? "";
   const persona = participant?.persona ?? "";
-  return ["-p", "--output-format", "json", "--model", model, "--system-prompt", persona];
+  const args = ["-p", "--output-format", "json", "--model", model, "--system-prompt", persona];
+  if (participant?.pcAccess === "full") {
+    args.push("--permission-mode", "bypassPermissions");
+  }
+  return args;
 }
 
 /**

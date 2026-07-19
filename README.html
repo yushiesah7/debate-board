@@ -112,9 +112,9 @@ node src/server.mjs
   "port": 8787,
   "maxRounds": 4,
   "participants": [
-    { "id": "nagi",  "name": "凪",        "adapter": "claude", "model": "sonnet", "enabled": true },
-    { "id": "aki",   "name": "アキ",      "adapter": "codex",  "enabled": true },
-    { "id": "roki",  "name": "ロキ",      "adapter": "grok",   "enabled": true },
+    { "id": "nagi",  "name": "凪",        "adapter": "claude", "model": "sonnet", "pcAccess": "read", "enabled": true },
+    { "id": "aki",   "name": "アキ",      "adapter": "codex",  "pcAccess": "read", "enabled": true },
+    { "id": "roki",  "name": "ロキ",      "adapter": "grok",   "pcAccess": "read", "enabled": true },
     { "id": "local", "name": "ローカルLLM", "adapter": "ollama", "model": "qwen3",
       "endpoint": "http://127.0.0.1:11434", "enabled": false },
     { "id": "you",   "name": "あなた",    "adapter": "human",  "enabled": false }
@@ -130,6 +130,15 @@ node src/server.mjs
   <tr><td><code>human</code></td><td>GUIの入力欄</td><td>1人まで。ターンが来ると入力待ちUIに</td></tr>
 </table>
 <p>人数・組み合わせは自由（AI 5人の乱闘も可）。<b>ターン順は配列の並び順</b>です。</p>
+
+<div class="card">
+  <h3>🔑 pcAccess — AIにPCをどこまで見せるか（CLI系のみ）</h3>
+  <table>
+    <tr><th><code>"read"</code>（既定）</th><td>AIが<b>PC内のファイルを読んで</b>議論の根拠にできる（例:「このリポの設計を踏まえて意見して」）。書き込み・実行は不可</td></tr>
+    <tr><th><code>"full"</code></th><td>読み書き・コマンド実行まで許可。<span class="warn">明示オプトイン・自己責任</span>（信頼できるお題でだけ推奨）</td></tr>
+  </table>
+  <p class="muted">ollama / openai-compat / human はHTTP・GUIのみなので対象外。プライバシー重視ならCLI自体の権限設定でも縛れます。</p>
+</div>
 
 <h2>🔒 プライバシー</h2>
 <ul>

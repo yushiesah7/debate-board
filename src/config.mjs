@@ -12,6 +12,12 @@
  * @property {string} [endpoint]
  * @property {string} [persona]
  * @property {boolean} enabled
+ * @property {"read"|"full"} pcAccess
+ *   How much of the user's PC the participant's AI may touch during a debate.
+ *   "read" (default) = look-only; "full" = read/write/execute — an explicit,
+ *   at-your-own-risk opt-in. Only meaningful for CLI adapters (claude/codex/
+ *   grok); ollama, openai-compat and human have no PC access at all, so the
+ *   value is accepted but ignored for them.
  *
  * @typedef {object} Config
  * @property {number} port
@@ -26,6 +32,8 @@ import { ADAPTER_NAMES } from "./adapters/index.mjs";
 
 export const DEFAULT_PORT = 8787;
 export const DEFAULT_MAX_ROUNDS = 4;
+export const PC_ACCESS_VALUES = ["read", "full"];
+export const DEFAULT_PC_ACCESS = "read";
 
 /**
  * Load and validate config from `<rootDir>/config.json`, falling back to
@@ -121,6 +129,22 @@ export function validateConfig(raw) {
       }
     }
 
+    // pcAccess: default "read"; if present it must be one of PC_ACCESS_VALUES.
+    // (Ignored at runtime by ollama/openai-compat/human, but still validated
+    // so typos never silently grant or deny access.)
+    let pcAccess = DEFAULT_PC_ACCESS;
+    if (participant.pcAccess !== undefined) {
+      if (
+        typeof participant.pcAccess !== "string" ||
+        !PC_ACCESS_VALUES.includes(participant.pcAccess)
+      ) {
+        throw new Error(
+          `participant "${participant.id}" pcAccess must be one of ${PC_ACCESS_VALUES.join("|")} (got ${JSON.stringify(participant.pcAccess)})`
+        );
+      }
+      pcAccess = participant.pcAccess;
+    }
+
     // enabled: default true; if present it must be a real boolean.
     let enabled;
     if (participant.enabled === undefined) {
@@ -133,7 +157,7 @@ export function validateConfig(raw) {
       );
     }
 
-    normalized.push(/** @type {Participant} */ ({ ...participant, enabled }));
+    normalized.push(/** @type {Participant} */ ({ ...participant, enabled, pcAccess }));
   }
 
   let port = DEFAULT_PORT;

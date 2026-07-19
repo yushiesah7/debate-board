@@ -165,9 +165,8 @@ test("resolveCommand is a no-op on non-Windows platforms", () => {
 // claude adapter: argv + output parsing (no real spawn)
 // ---------------------------------------------------------------------------
 
-test("buildClaudeArgs builds expected argv", () => {
-  const args = buildClaudeArgs({ model: "sonnet", persona: "あなたは司会です" });
-  assert.deepEqual(args, [
+test("buildClaudeArgs builds expected argv (pcAccess read = no extra flags)", () => {
+  const expected = [
     "-p",
     "--output-format",
     "json",
@@ -175,7 +174,17 @@ test("buildClaudeArgs builds expected argv", () => {
     "sonnet",
     "--system-prompt",
     "あなたは司会です",
-  ]);
+  ];
+  assert.deepEqual(buildClaudeArgs({ model: "sonnet", persona: "あなたは司会です" }), expected);
+  assert.deepEqual(
+    buildClaudeArgs({ model: "sonnet", persona: "あなたは司会です", pcAccess: "read" }),
+    expected
+  );
+});
+
+test("buildClaudeArgs adds bypassPermissions for pcAccess full", () => {
+  const args = buildClaudeArgs({ model: "sonnet", persona: "p", pcAccess: "full" });
+  assert.deepEqual(args.slice(-2), ["--permission-mode", "bypassPermissions"]);
 });
 
 test("parseClaudeOutput extracts result field and parses nested JSON", () => {
@@ -205,9 +214,8 @@ test("parseClaudeOutput throws on unparsable envelope", () => {
 // codex adapter: argv + JSONL output parsing (no real spawn)
 // ---------------------------------------------------------------------------
 
-test("buildCodexArgs builds expected argv (incl. MCP disable)", () => {
-  const args = buildCodexArgs({ schemaFilePath: "/tmp/schema.json", cwd: "/tmp/wd" });
-  assert.deepEqual(args, [
+test("buildCodexArgs builds expected argv (incl. MCP disable, read sandbox default)", () => {
+  const expected = [
     "exec",
     "--json",
     "--output-schema",
@@ -217,7 +225,19 @@ test("buildCodexArgs builds expected argv (incl. MCP disable)", () => {
     "/tmp/wd",
     "-c",
     "mcp_servers={}",
-  ]);
+    "--sandbox",
+    "read-only",
+  ];
+  assert.deepEqual(buildCodexArgs({ schemaFilePath: "/tmp/schema.json", cwd: "/tmp/wd" }), expected);
+  assert.deepEqual(
+    buildCodexArgs({ schemaFilePath: "/tmp/schema.json", cwd: "/tmp/wd", pcAccess: "read" }),
+    expected
+  );
+});
+
+test("buildCodexArgs uses danger-full-access sandbox for pcAccess full", () => {
+  const args = buildCodexArgs({ schemaFilePath: "/tmp/s.json", cwd: "/tmp/wd", pcAccess: "full" });
+  assert.deepEqual(args.slice(-2), ["--sandbox", "danger-full-access"]);
 });
 
 test("buildCodexArgs appends -m when model is configured", () => {
@@ -358,14 +378,8 @@ test("parseCodexOutput throws on empty output", () => {
 // grok adapter: argv + output parsing (no real spawn)
 // ---------------------------------------------------------------------------
 
-test("buildGrokArgs builds expected argv (prompt via --prompt-file)", () => {
-  const args = buildGrokArgs({
-    promptFilePath: "/tmp/grokwd/prompt.txt",
-    schemaJson: { type: "object" },
-    persona: "ロキです",
-    cwd: "/tmp/grokwd",
-  });
-  assert.deepEqual(args, [
+test("buildGrokArgs builds expected argv (pcAccess read default: plan / 6 turns)", () => {
+  const expected = [
     "--prompt-file",
     "/tmp/grokwd/prompt.txt",
     "--json-schema",
@@ -379,10 +393,40 @@ test("buildGrokArgs builds expected argv (prompt via --prompt-file)", () => {
     "--no-memory",
     "--disable-web-search",
     "--permission-mode",
-    "dontAsk",
+    "plan",
     "--max-turns",
-    "3",
-  ]);
+    "6",
+  ];
+  assert.deepEqual(
+    buildGrokArgs({
+      promptFilePath: "/tmp/grokwd/prompt.txt",
+      schemaJson: { type: "object" },
+      persona: "ロキです",
+      cwd: "/tmp/grokwd",
+    }),
+    expected
+  );
+  assert.deepEqual(
+    buildGrokArgs({
+      promptFilePath: "/tmp/grokwd/prompt.txt",
+      schemaJson: { type: "object" },
+      persona: "ロキです",
+      cwd: "/tmp/grokwd",
+      pcAccess: "read",
+    }),
+    expected
+  );
+});
+
+test("buildGrokArgs uses bypassPermissions / 10 turns for pcAccess full", () => {
+  const args = buildGrokArgs({
+    promptFilePath: "/tmp/grokwd/prompt.txt",
+    schemaJson: { type: "object" },
+    persona: "ロキです",
+    cwd: "/tmp/grokwd",
+    pcAccess: "full",
+  });
+  assert.deepEqual(args.slice(-4), ["--permission-mode", "bypassPermissions", "--max-turns", "10"]);
 });
 
 test("parseGrokOutput prefers structuredOutput", () => {
@@ -722,14 +766,62 @@ test("validateConfig accepts the shipped config.example.json shape", () => {
     port: 8787,
     maxRounds: 4,
     participants: [
-      { id: "nagi", name: "凪", adapter: "claude", model: "sonnet", enabled: true },
-      { id: "aki", name: "アキ", adapter: "codex", enabled: true },
-      { id: "roki", name: "ロキ", adapter: "grok", enabled: true },
+      { id: "nagi", name: "凪", adapter: "claude", model: "sonnet", pcAccess: "read", enabled: true },
+      { id: "aki", name: "アキ", adapter: "codex", pcAccess: "read", enabled: true },
+      { id: "roki", name: "ロキ", adapter: "grok", pcAccess: "read", enabled: true },
       { id: "local", name: "ローカルLLM", adapter: "ollama", model: "qwen3", endpoint: "http://127.0.0.1:11434", enabled: false },
       { id: "you", name: "あなた", adapter: "human", enabled: false },
     ],
   });
   assert.equal(cfg.participants.length, 5);
+});
+
+// ---------------------------------------------------------------------------
+// config validation: pcAccess
+// ---------------------------------------------------------------------------
+
+test("validateConfig fills pcAccess default 'read' when omitted", () => {
+  const cfg = validateConfig({
+    participants: [{ id: "a", name: "A", adapter: "claude", enabled: true }],
+  });
+  assert.equal(cfg.participants[0].pcAccess, "read");
+});
+
+test("validateConfig preserves explicit pcAccess values", () => {
+  const cfg = validateConfig({
+    participants: [
+      { id: "a", name: "A", adapter: "claude", pcAccess: "full", enabled: true },
+      { id: "b", name: "B", adapter: "codex", pcAccess: "read", enabled: true },
+    ],
+  });
+  assert.equal(cfg.participants[0].pcAccess, "full");
+  assert.equal(cfg.participants[1].pcAccess, "read");
+});
+
+test("validateConfig rejects invalid pcAccess values", () => {
+  for (const bad of ["write", "FULL", "", 1, true, null]) {
+    assert.throws(
+      () =>
+        validateConfig({
+          participants: [{ id: "a", name: "A", adapter: "claude", pcAccess: bad, enabled: true }],
+        }),
+      undefined,
+      `expected pcAccess=${JSON.stringify(bad)} to be rejected`
+    );
+  }
+});
+
+test("validateConfig accepts (and normalizes) pcAccess on non-CLI adapters too", () => {
+  // ollama/openai-compat/human ignore pcAccess at runtime, but a valid value
+  // must not be rejected, and the default is still filled in.
+  const cfg = validateConfig({
+    participants: [
+      { id: "local", name: "L", adapter: "ollama", endpoint: "http://127.0.0.1:11434", pcAccess: "full", enabled: false },
+      { id: "you", name: "Y", adapter: "human", enabled: false },
+    ],
+  });
+  assert.equal(cfg.participants[0].pcAccess, "full");
+  assert.equal(cfg.participants[1].pcAccess, "read");
 });
 
 // ---------------------------------------------------------------------------

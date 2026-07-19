@@ -16,7 +16,17 @@
 ## 2. 参加者（プラガブル）とトグル
 
 参加者は `config.json` で自由に定義する（人数・種類とも可変）。
-各参加者: `{id, name, adapter, model?, endpoint?, persona?, enabled}`。ターン順は配列順。
+各参加者: `{id, name, adapter, model?, endpoint?, persona?, enabled, pcAccess?}`。ターン順は配列順。
+
+### pcAccess（CLI系アダプタのPCアクセス度合い）
+
+| 値 | 意味 | claude | codex | grok |
+|---|---|---|---|---|
+| `"read"`（既定） | ファイルを**読める**（議論の根拠にPC内の資料を参照可）。書き込み・実行は不可 | 追加フラグなし（headless既定） | `--sandbox read-only` | `--permission-mode plan --max-turns 6` |
+| `"full"` | 読み書き・実行まで許可（**明示オプトイン・自己責任**） | `--permission-mode bypassPermissions` | `--sandbox danger-full-access` | `--permission-mode bypassPermissions --max-turns 10` |
+
+ollama / openai-compat / human はHTTP・GUIのみでPCに触れないため対象外（指定は無視）。
+grokの `--max-turns` はツール使用の周回上限（1発言の所要時間ガード。ファイル参照の周回分を確保しつつ暴走探索を防ぐ）。
 
 ### アダプタ種別
 
@@ -128,6 +138,7 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 - progress・テスト・ドキュメントに実際の議論内容を書かない（テストはダミーお題を使う）
 - ローカルLLMアダプタのendpointはlocalhost想定。リモートURLを設定する場合は利用者の自己責任
 - grok呼び出しは `--system-prompt-override`＋専用 `--cwd`＋`--no-memory`（コーディング用プロンプト回避と記憶汚染防止）
+- CLI系参加者のPCアクセスは既定で読み取り専用（`pcAccess: "read"`）。書き込み許可は参加者ごとの明示オプトイン（§2）
 - 同時に走る議論は1つ（v1）。Windows/macOS/Linuxで動作（プロセス起動はクロスプラットフォーム対応）
 
 ## 10. マイルストーン

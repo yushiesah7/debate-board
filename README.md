@@ -40,6 +40,10 @@ node src/cli.mjs "きのこの山 vs たけのこの里、どちらが至高か"
 
 `config.json` の `participants` を編集（人数・種類は自由、ターン順=配列順）。
 アダプタ: `claude` / `codex` / `grok` / `ollama` / `openai-compat` / `human`（1人まで）。
+
+CLI系参加者には `pcAccess` を指定可能:
+- `"read"`（既定）— AIがPC内のファイルを**読んで**議論の根拠にできる（書き込み不可）
+- `"full"` — 読み書き・実行まで許可（明示オプトイン・自己責任）
 詳細は [README.html](README.html) または [docs/SPEC.md](docs/SPEC.md) §2 を参照。
 
 ## ドキュメント
