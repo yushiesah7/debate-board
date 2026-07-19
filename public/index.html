@@ -1,0 +1,1078 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>debate-board</title>
+<style>
+  :root {
+    --bg: #14161c;
+    --bg-panel: #1b1e26;
+    --bg-card: #23262f;
+    --bg-lane: #1a1c23;
+    --border: #333744;
+    --text: #e6e8ee;
+    --text-dim: #9aa0ad;
+    --accent: #6ea8ff;
+    --accent-dim: #3a5a8f;
+    --green: #52c98a;
+    --yellow: #e0b84b;
+    --pink: #d97ec8;
+    --danger: #e0625b;
+    --shadow: 0 2px 8px rgba(0,0,0,0.4);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Yu Gothic UI", "Hiragino Kaku Gothic ProN", sans-serif;
+    height: 100%;
+  }
+  button {
+    font-family: inherit;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+  button.danger { border-color: var(--danger); color: var(--danger); }
+  input, textarea, select {
+    font-family: inherit;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 13px;
+  }
+  input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); }
+
+  #mock-badge {
+    display: none;
+    position: fixed;
+    top: 8px; right: 12px;
+    background: var(--yellow);
+    color: #2a2200;
+    font-weight: 700;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    z-index: 1000;
+    box-shadow: var(--shadow);
+  }
+  #mock-badge.show { display: block; cursor: pointer; }
+
+  #toast {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--danger);
+    color: #fff;
+    font-size: 13px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    z-index: 1100;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  #toast.show { opacity: 1; }
+
+  #start-error {
+    color: var(--danger);
+    font-size: 12px;
+    margin-top: 8px;
+    min-height: 16px;
+  }
+
+  header {
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 16px;
+    margin: 0;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  #topic-display {
+    font-size: 15px;
+    font-weight: 600;
+    flex: 1;
+    min-width: 120px;
+  }
+  #round-display {
+    font-size: 13px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  #status-display {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .status-running { color: var(--green); border-color: var(--green); }
+  .status-paused { color: var(--yellow); border-color: var(--yellow); }
+  .status-idle { color: var(--text-dim); }
+  .status-ended { color: var(--pink); border-color: var(--pink); }
+
+  #header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  #participants-bar {
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 16px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  /* buttonデフォルトスタイルをリセットしてチップ見た目を維持 */
+  .chip {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    line-height: inherit;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .chip:hover { border-color: var(--accent); }
+  .chip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .chip.on { border-color: var(--green); background: rgba(82,201,138,0.12); }
+  .chip.off { opacity: 0.55; }
+  .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+  .chip.on .dot { background: var(--green); }
+  .chip .adapter-tag { font-size: 10px; color: var(--text-dim); }
+
+  #main {
+    display: flex;
+    height: calc(100vh - 108px);
+    min-height: 400px;
+  }
+  #board {
+    flex: 3;
+    display: flex;
+    gap: 12px;
+    padding: 12px;
+    overflow-x: auto;
+  }
+  .lane {
+    flex: 1;
+    min-width: 240px;
+    background: var(--bg-lane);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    padding: 10px;
+  }
+  .lane.drag-over { border-color: var(--accent); background: rgba(110,168,255,0.06); }
+  .lane-header {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .lane-cards {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 60px;
+  }
+  .card {
+    background: var(--bg-card);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    padding: 10px 12px;
+    cursor: grab;
+    border: 1px solid transparent;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card.dragging { opacity: 0.4; }
+  .card-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .card-body { font-size: 12px; color: var(--text-dim); white-space: pre-wrap; word-break: break-word; }
+  .card-meta { font-size: 10px; color: var(--text-dim); margin-top: 6px; }
+  .add-card-btn {
+    margin-top: 8px;
+    width: 100%;
+    border-style: dashed;
+    color: var(--text-dim);
+  }
+
+  #side {
+    flex: 2;
+    min-width: 300px;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border);
+    background: var(--bg-panel);
+  }
+  #tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .tab-btn {
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+    border-bottom: 2px solid transparent;
+  }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  #tab-content { flex: 1; overflow-y: auto; padding: 10px; }
+
+  .transcript-entry {
+    background: var(--bg-card);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+  }
+  .transcript-head {
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    color: var(--accent);
+  }
+  .transcript-round { color: var(--text-dim); font-weight: 400; }
+  .transcript-body { font-size: 13px; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+
+  #note-area {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    gap: 8px;
+  }
+  #note-textarea {
+    flex: 1;
+    resize: none;
+    min-height: 200px;
+  }
+  #note-hint { font-size: 11px; color: var(--text-dim); }
+
+  #human-turn {
+    display: none;
+    background: rgba(224,184,75,0.12);
+    border-top: 2px solid var(--yellow);
+    padding: 10px 16px;
+    gap: 8px;
+    align-items: center;
+  }
+  #human-turn.show { display: flex; }
+  #human-turn .label { font-weight: 700; color: var(--yellow); font-size: 13px; white-space: nowrap; }
+  #human-input { flex: 1; }
+
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 500;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal-box {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    width: 420px;
+    max-width: 90vw;
+    box-shadow: var(--shadow);
+  }
+  .modal-box h3 { margin-top: 0; font-size: 15px; }
+  .modal-box label { display: block; font-size: 12px; color: var(--text-dim); margin: 10px 0 4px; }
+  .modal-box input, .modal-box textarea, .modal-box select { width: 100%; }
+  .modal-box textarea { min-height: 100px; resize: vertical; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+  #start-modal .modal-box { width: 360px; }
+
+  footer#empty-hint {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 12px;
+    padding: 8px;
+  }
+</style>
+</head>
+<body>
+
+<div id="mock-badge" title="クリックでサーバ再接続を試す">モックモード</div>
+<div id="toast"></div>
+
+<header>
+  <h1>debate-board</h1>
+  <div id="topic-display">お題未設定</div>
+  <div id="round-display">ラウンド -</div>
+  <div id="status-display" class="status-idle">停止中</div>
+  <div id="header-actions">
+    <button id="btn-start" class="primary">開始</button>
+    <button id="btn-pause">一時停止</button>
+    <button id="btn-end" class="danger">終了</button>
+  </div>
+</header>
+
+<div id="participants-bar"></div>
+
+<div id="main">
+  <div id="board">
+    <div class="lane" data-lane="decided">
+      <div class="lane-header"><span>✅ decided</span></div>
+      <div class="lane-cards" data-lane="decided"></div>
+      <button class="add-card-btn" data-lane="decided">+ カード追加</button>
+    </div>
+    <div class="lane" data-lane="discussing">
+      <div class="lane-header"><span>💬 discussing</span></div>
+      <div class="lane-cards" data-lane="discussing"></div>
+      <button class="add-card-btn" data-lane="discussing">+ カード追加</button>
+    </div>
+    <div class="lane" data-lane="held">
+      <div class="lane-header"><span>⏸ held</span></div>
+      <div class="lane-cards" data-lane="held"></div>
+      <button class="add-card-btn" data-lane="held">+ カード追加</button>
+    </div>
+  </div>
+
+  <div id="side">
+    <div id="tabs">
+      <button class="tab-btn active" data-tab="transcript">発言ログ</button>
+    </div>
+    <div id="tab-content"></div>
+  </div>
+</div>
+
+<div id="human-turn">
+  <div class="label">あなたの発言番です</div>
+  <input id="human-input" type="text" placeholder="発言を入力...">
+  <button id="btn-say" class="primary">発言</button>
+  <button id="btn-skip">スキップ</button>
+</div>
+
+<!-- カード編集モーダル -->
+<div class="modal-overlay" id="card-modal">
+  <div class="modal-box">
+    <h3 id="card-modal-title">カード編集</h3>
+    <label>レーン</label>
+    <select id="card-modal-lane">
+      <option value="decided">✅ decided</option>
+      <option value="discussing">💬 discussing</option>
+      <option value="held">⏸ held</option>
+    </select>
+    <label>タイトル</label>
+    <input id="card-modal-title-input" type="text" maxlength="80">
+    <label>本文</label>
+    <textarea id="card-modal-body-input" maxlength="1000"></textarea>
+    <div class="modal-actions">
+      <button id="card-modal-cancel">キャンセル</button>
+      <button id="card-modal-save" class="primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 開始モーダル -->
+<div class="modal-overlay" id="start-modal">
+  <div class="modal-box">
+    <h3>議論を開始</h3>
+    <label>お題</label>
+    <input id="start-topic-input" type="text" maxlength="200" placeholder="例: きのこ vs たけのこ">
+    <label>ラウンド数</label>
+    <input id="start-rounds-input" type="number" min="1" max="20" value="4">
+    <div id="start-error"></div>
+    <div class="modal-actions">
+      <button id="start-modal-cancel">キャンセル</button>
+      <button id="start-modal-ok" class="primary">開始する</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ------------------------------------------------------------------
+  // モック state（サーバ未起動時のフォールバック用）
+  // ------------------------------------------------------------------
+  function buildMockState() {
+    return {
+      board: {
+        meta: { topic: "きのこ vs たけのこ", round: 2, status: "paused" },
+        cards: [
+          { id: "c1", lane: "decided", title: "呼称は正式表記で統一", body: "「きのこの山」「たけのこの里」の正式商品名で議論する。", createdBy: "凪" },
+          { id: "c2", lane: "decided", title: "評価軸は3つに絞る", body: "食感・チョコ比率・携帯性の3軸で比較する。", createdBy: "アキ" },
+          { id: "c3", lane: "discussing", title: "チョコとクッキーの黄金比", body: "きのこは傘部分のチョコが厚め、たけのこは節ごとの層構造が争点。", createdBy: "ロキ" },
+          { id: "c4", lane: "discussing", title: "携帯時の割れやすさ", body: "たけのこは節で割れやすいのでは、という指摘あり。要検証。", createdBy: "あなた" },
+          { id: "c5", lane: "held", title: "地域による支持率差", body: "今回のスコープ外。次回議論の候補として保留。", createdBy: "凪" },
+          { id: "c6", lane: "held", title: "限定フレーバーの扱い", body: "定番品のみを対象とし、期間限定品は今回は扱わない。", createdBy: "アキ" }
+        ],
+        notes: {
+          nagi: "論点を3軸に絞れたのは良い進行。次は具体的なエビデンスを集めたい。",
+          aki: "携帯性の観点、もう少しデータが欲しい。宿題：外装の耐久性を調べる。",
+          loki: "チョコの厚みは正義。次のターンで押し切る。",
+          human: ""
+        },
+        summary: null
+      },
+      participants: [
+        { id: "nagi", name: "凪", adapter: "claude", enabled: true },
+        { id: "aki", name: "アキ", adapter: "codex", enabled: true },
+        { id: "loki", name: "ロキ", adapter: "grok", enabled: true },
+        { id: "human", name: "あなた", adapter: "human", enabled: true }
+      ],
+      awaitingHuman: { participantId: "human" },
+      transcript: [
+        { participantId: "nagi", name: "凪", round: 1, text: "まず評価軸を決めましょう。食感・チョコ比率・携帯性でどうでしょうか。" },
+        { participantId: "aki", name: "アキ", round: 1, text: "賛成です。呼称も正式名称に統一しておくと議論がぶれません。" },
+        { participantId: "loki", name: "ロキ", round: 1, text: "異論なし。次は各軸の中身を詰めましょう。" },
+        { participantId: "nagi", name: "凪", round: 2, text: "チョコとクッキーの比率について、きのこの傘部分は厚めという指摘がありますが皆さんどう見ますか。" },
+        { participantId: "aki", name: "アキ", round: 2, text: "携帯時の割れやすさも気になります。たけのこは節で割れやすいのでは。" }
+      ]
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // アプリ状態
+  // ------------------------------------------------------------------
+  var MOCK = false;
+  var state = null; // {board, participants, awaitingHuman, transcript}
+  var activeSideTab = "transcript"; // "transcript" | note participantId
+  var myParticipantId = null; // human視点として扱う参加者id（モック/実運用共通で "human" 系を推定）
+  var draggedCardId = null;
+  var eventSource = null;
+  var sseDown = false; // SSE切断中フラグ（ステータス表示を「再接続中」に）
+  var noteDirty = false; // NOTE下書きが未保存
+  var noteSaveTimer = null;
+  var dragJustEnded = false; // ドラッグ直後のclick抑制フラグ
+  var toastTimer = null;
+
+  function log() {
+    // モック時の擬似POSTログ
+    console.log.apply(console, ["[mock-api]"].concat(Array.prototype.slice.call(arguments)));
+  }
+
+  function showToast(msg) {
+    var t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove("show"); }, 4000);
+  }
+
+  function isValidState(s) {
+    return !!(s && s.board && s.board.meta && Array.isArray(s.participants));
+  }
+
+  // ------------------------------------------------------------------
+  // API 呼び出し
+  //  - mockモード: ローカルstateに適用して即描画
+  //  - 実モード: 成功応答は /api/state と同形 → stateを置換して即描画
+  //              失敗時はトースト表示＋/api/state再取得のみ（ローカル偽適用しない）
+  // ------------------------------------------------------------------
+  function apiPost(path, body) {
+    if (MOCK) {
+      log("POST", path, body);
+      applyMockPost(path, body);
+      render();
+      return Promise.resolve({ ok: true, mock: true });
+    }
+    return fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    }).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status + " " + path);
+      return res.json().catch(function () { return null; });
+    }).then(function (data) {
+      if (isValidState(data)) {
+        state = data;
+        myParticipantId = detectMyParticipantId();
+        render();
+      }
+      return { ok: true, data: data };
+    }).catch(function (err) {
+      console.error("API error:", err);
+      showToast("通信エラー: " + path);
+      fetchState().then(function (s) {
+        state = s;
+        render();
+      }).catch(function () { /* サーバダウン中は現状表示を維持 */ });
+      return { ok: false, error: String(err) };
+    });
+  }
+
+  function fetchState() {
+    if (MOCK) {
+      return Promise.resolve(state);
+    }
+    return fetchRealState();
+  }
+
+  function fetchRealState() {
+    return fetch("/api/state").then(function (res) {
+      if (!res.ok) throw new Error("state fetch failed");
+      return res.json();
+    }).then(function (s) {
+      if (!isValidState(s)) throw new Error("invalid state shape (board/participants欠落)");
+      return s;
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // モック時のPOST動作をローカルstateに反映
+  // ------------------------------------------------------------------
+  function genId(prefix) {
+    return prefix + "_" + Math.random().toString(36).slice(2, 9);
+  }
+
+  function applyMockPost(path, body) {
+    body = body || {};
+    if (path === "/api/start") {
+      // ボード初期化（サンプルデータをリセット）
+      state.board.meta.topic = body.topic || state.board.meta.topic;
+      state.board.meta.round = 1;
+      state.board.meta.status = "running";
+      state.board.meta.maxRounds = body.maxRounds || 4;
+      state.board.cards = [];
+      state.board.summary = null;
+      state.transcript = [];
+      state.awaitingHuman = null;
+      Object.keys(state.board.notes || {}).forEach(function (k) {
+        state.board.notes[k] = "";
+      });
+    } else if (path === "/api/pause") {
+      var cur = state.board.meta.status;
+      if (cur === "running") state.board.meta.status = "paused";
+      else if (cur === "paused") state.board.meta.status = "running";
+    } else if (path === "/api/toggle") {
+      var p = state.participants.find(function (x) { return x.id === body.id; });
+      if (p) p.enabled = !!body.enabled;
+    } else if (path === "/api/card") {
+      handleMockCardOp(body);
+    } else if (path === "/api/say") {
+      var speaker = state.participants.find(function (x) { return x.id === myParticipantId; });
+      state.transcript.push({
+        participantId: myParticipantId,
+        name: speaker ? speaker.name : "あなた",
+        round: state.board.meta.round,
+        text: body.text || ""
+      });
+      state.awaitingHuman = null;
+    } else if (path === "/api/skip") {
+      state.awaitingHuman = null;
+    } else if (path === "/api/end") {
+      state.board.meta.status = "ended";
+      state.awaitingHuman = null;
+    } else if (path === "/api/note") {
+      if (myParticipantId) state.board.notes[myParticipantId] = body.text || "";
+    }
+  }
+
+  function handleMockCardOp(body) {
+    if (body.op === "add") {
+      var id = genId("c");
+      state.board.cards.push({
+        id: id,
+        lane: body.lane || "discussing",
+        title: body.title || "(無題)",
+        body: body.body || "",
+        createdBy: myParticipantId || "あなた"
+      });
+    } else if (body.op === "move") {
+      var card = state.board.cards.find(function (c) { return c.id === body.cardId; });
+      if (card && body.lane) card.lane = body.lane;
+    } else if (body.op === "edit") {
+      var c2 = state.board.cards.find(function (c) { return c.id === body.cardId; });
+      if (c2) {
+        if (typeof body.title === "string") c2.title = body.title;
+        if (typeof body.body === "string") c2.body = body.body;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 描画
+  // ------------------------------------------------------------------
+  function statusLabel(s) {
+    switch (s) {
+      case "running": return { text: "進行中", cls: "status-running" };
+      case "paused": return { text: "一時停止", cls: "status-paused" };
+      case "ended": return { text: "終了", cls: "status-ended" };
+      default: return { text: "停止中", cls: "status-idle" };
+    }
+  }
+
+  function render() {
+    if (!state) return;
+    var meta = state.board.meta || {};
+    document.getElementById("topic-display").textContent = meta.topic || "お題未設定";
+    document.getElementById("round-display").textContent = "ラウンド " + (meta.round != null ? meta.round : "-");
+    var statusEl = document.getElementById("status-display");
+    if (sseDown) {
+      statusEl.textContent = "再接続中…";
+      statusEl.className = "status-paused";
+    } else {
+      var st = statusLabel(meta.status);
+      statusEl.textContent = st.text;
+      statusEl.className = st.cls;
+    }
+
+    renderParticipants();
+    renderBoard();
+    renderTabs();
+    renderTabContent();
+    renderHumanTurn();
+  }
+
+  function renderParticipants() {
+    var bar = document.getElementById("participants-bar");
+    bar.innerHTML = "";
+    (state.participants || []).forEach(function (p) {
+      var chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip " + (p.enabled ? "on" : "off");
+      chip.setAttribute("aria-pressed", p.enabled ? "true" : "false");
+      chip.innerHTML = '<span class="dot"></span><span>' + escapeHtml(p.name) + '</span><span class="adapter-tag">' + escapeHtml(p.adapter) + '</span>';
+      chip.addEventListener("click", function () {
+        apiPost("/api/toggle", { id: p.id, enabled: !p.enabled });
+      });
+      bar.appendChild(chip);
+    });
+  }
+
+  var LANES = ["decided", "discussing", "held"];
+
+  function renderBoard() {
+    LANES.forEach(function (lane) {
+      var container = document.querySelector('.lane-cards[data-lane="' + lane + '"]');
+      container.innerHTML = "";
+      var cards = (state.board.cards || []).filter(function (c) { return c.lane === lane; });
+      cards.forEach(function (card) {
+        container.appendChild(renderCard(card));
+      });
+    });
+  }
+
+  function renderCard(card) {
+    var el = document.createElement("div");
+    el.className = "card";
+    el.draggable = true;
+    el.dataset.cardId = card.id;
+    el.innerHTML =
+      '<div class="card-title"></div>' +
+      '<div class="card-body"></div>' +
+      '<div class="card-meta"></div>';
+    el.querySelector(".card-title").textContent = card.title || "(無題)";
+    el.querySelector(".card-body").textContent = card.body || "";
+    el.querySelector(".card-meta").textContent = card.createdBy ? ("by " + card.createdBy) : "";
+
+    el.addEventListener("dragstart", function (e) {
+      draggedCardId = card.id;
+      el.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", card.id); } catch (err) {}
+    });
+    el.addEventListener("dragend", function () {
+      el.classList.remove("dragging");
+      draggedCardId = null;
+      // ドラッグ直後のclickで編集モーダルが開くのを1回だけ抑制
+      dragJustEnded = true;
+      setTimeout(function () { dragJustEnded = false; }, 300);
+    });
+    el.addEventListener("click", function () {
+      if (dragJustEnded) { dragJustEnded = false; return; }
+      openCardModal(card);
+    });
+    return el;
+  }
+
+  function renderTabs() {
+    var tabs = document.getElementById("tabs");
+    tabs.innerHTML = "";
+    var transcriptBtn = makeTabBtn("transcript", "発言ログ");
+    tabs.appendChild(transcriptBtn);
+    (state.participants || []).forEach(function (p) {
+      tabs.appendChild(makeTabBtn(p.id, "NOTE: " + p.name));
+    });
+  }
+
+  function makeTabBtn(key, label) {
+    var btn = document.createElement("button");
+    btn.className = "tab-btn" + (activeSideTab === key ? " active" : "");
+    btn.textContent = label;
+    btn.addEventListener("click", function () {
+      activeSideTab = key;
+      renderTabs();
+      renderTabContent();
+    });
+    return btn;
+  }
+
+  function renderTabContent() {
+    var content = document.getElementById("tab-content");
+    if (activeSideTab !== "transcript") {
+      // NOTEタブ編集中（フォーカス中 or 未保存下書きあり）はtextareaを再マウントしない
+      var existing = document.getElementById("note-textarea");
+      if (existing && existing.dataset.pid === activeSideTab &&
+          (document.activeElement === existing || noteDirty)) {
+        return;
+      }
+    }
+    content.innerHTML = "";
+    if (activeSideTab === "transcript") {
+      var list = state.transcript || [];
+      if (list.length === 0) {
+        var empty = document.createElement("div");
+        empty.id = "empty-hint";
+        empty.textContent = "まだ発言はありません。";
+        content.appendChild(empty);
+        return;
+      }
+      list.forEach(function (entry) {
+        var el = document.createElement("div");
+        el.className = "transcript-entry";
+        el.innerHTML =
+          '<div class="transcript-head"><span></span><span class="transcript-round"></span></div>' +
+          '<div class="transcript-body"></div>';
+        el.querySelector(".transcript-head span").textContent = entry.name || entry.participantId || "?";
+        el.querySelector(".transcript-round").textContent = "R" + entry.round;
+        el.querySelector(".transcript-body").textContent =
+          entry.text != null ? entry.text : (entry.utterance || "");
+        content.appendChild(el);
+      });
+      content.scrollTop = content.scrollHeight;
+    } else {
+      // NOTEタブ（activeSideTab = participantId）
+      var pid = activeSideTab;
+      var noteText = (state.board.notes && state.board.notes[pid]) || "";
+      var editable = pid === myParticipantId;
+      var wrap = document.createElement("div");
+      wrap.id = "note-area";
+      var textarea = document.createElement("textarea");
+      textarea.id = "note-textarea";
+      textarea.dataset.pid = pid;
+      textarea.value = noteText;
+      textarea.readOnly = !editable;
+      if (!editable) textarea.style.opacity = "0.7";
+      var hint = document.createElement("div");
+      hint.id = "note-hint";
+      hint.textContent = editable ? "自分のNOTEです。編集すると自動保存されます。" : "他の参加者のNOTEです（閲覧のみ）。";
+      wrap.appendChild(textarea);
+      wrap.appendChild(hint);
+      content.appendChild(wrap);
+
+      if (editable) {
+        // 再マウント時に旧タイマーがdetached要素を指さないようクリア
+        clearTimeout(noteSaveTimer);
+        noteDirty = false;
+        textarea.addEventListener("input", function () {
+          noteDirty = true;
+          clearTimeout(noteSaveTimer);
+          noteSaveTimer = setTimeout(function () {
+            var val = textarea.value;
+            apiPost("/api/note", { text: val }).then(function (r) {
+              if (r && r.ok) noteDirty = false;
+            });
+          }, 500);
+        });
+      }
+    }
+  }
+
+  function renderHumanTurn() {
+    var bar = document.getElementById("human-turn");
+    var awaiting = state.awaitingHuman;
+    var isMyTurn = awaiting && myParticipantId && awaiting.participantId === myParticipantId;
+    // myParticipantId 未確定時は awaitingHuman が存在する時点でヒトの入力枠を出す
+    if (awaiting && !myParticipantId) isMyTurn = true;
+    if (isMyTurn) {
+      bar.classList.add("show");
+    } else {
+      bar.classList.remove("show");
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // ドラッグ&ドロップ（レーン）
+  // ------------------------------------------------------------------
+  document.querySelectorAll(".lane").forEach(function (laneEl) {
+    laneEl.addEventListener("dragover", function (e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      laneEl.classList.add("drag-over");
+    });
+    laneEl.addEventListener("dragleave", function (e) {
+      // レーン内の子要素への移動では消さない（ハイライトちらつき防止）
+      if (e.relatedTarget && laneEl.contains(e.relatedTarget)) return;
+      laneEl.classList.remove("drag-over");
+    });
+    laneEl.addEventListener("drop", function (e) {
+      e.preventDefault();
+      laneEl.classList.remove("drag-over");
+      var lane = laneEl.dataset.lane;
+      var cardId = draggedCardId;
+      if (!cardId) return;
+      var card = state.board.cards.find(function (c) { return c.id === cardId; });
+      if (card && card.lane === lane) return; // no-op
+      apiPost("/api/card", { op: "move", cardId: cardId, lane: lane });
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // カード編集/追加モーダル
+  // ------------------------------------------------------------------
+  var cardModalMode = "edit"; // "edit" | "add"
+  var cardModalTargetId = null;
+  var cardModalDefaultLane = "discussing";
+
+  function openCardModal(card) {
+    cardModalMode = "edit";
+    cardModalTargetId = card.id;
+    document.getElementById("card-modal-title").textContent = "カード編集";
+    document.getElementById("card-modal-lane").value = card.lane;
+    document.getElementById("card-modal-title-input").value = card.title || "";
+    document.getElementById("card-modal-body-input").value = card.body || "";
+    document.getElementById("card-modal").classList.add("show");
+  }
+
+  function openAddCardModal(lane) {
+    cardModalMode = "add";
+    cardModalTargetId = null;
+    cardModalDefaultLane = lane;
+    document.getElementById("card-modal-title").textContent = "カード追加";
+    document.getElementById("card-modal-lane").value = lane;
+    document.getElementById("card-modal-title-input").value = "";
+    document.getElementById("card-modal-body-input").value = "";
+    document.getElementById("card-modal").classList.add("show");
+  }
+
+  function closeCardModal() {
+    document.getElementById("card-modal").classList.remove("show");
+  }
+
+  document.querySelectorAll(".add-card-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      openAddCardModal(btn.dataset.lane);
+    });
+  });
+
+  document.getElementById("card-modal-cancel").addEventListener("click", closeCardModal);
+  document.getElementById("card-modal").addEventListener("click", function (e) {
+    if (e.target.id === "card-modal") closeCardModal();
+  });
+  document.getElementById("card-modal-save").addEventListener("click", function () {
+    var lane = document.getElementById("card-modal-lane").value;
+    var title = document.getElementById("card-modal-title-input").value.trim();
+    var body = document.getElementById("card-modal-body-input").value;
+    if (!title) { document.getElementById("card-modal-title-input").focus(); return; }
+    if (cardModalMode === "add") {
+      apiPost("/api/card", { op: "add", lane: lane, title: title, body: body });
+    } else {
+      apiPost("/api/card", { op: "edit", cardId: cardModalTargetId, title: title, body: body });
+      if (lane) {
+        var card = state.board.cards.find(function (c) { return c.id === cardModalTargetId; });
+        if (card && card.lane !== lane) {
+          apiPost("/api/card", { op: "move", cardId: cardModalTargetId, lane: lane });
+        }
+      }
+    }
+    closeCardModal();
+  });
+
+  // ------------------------------------------------------------------
+  // 開始モーダル
+  // ------------------------------------------------------------------
+  document.getElementById("btn-start").addEventListener("click", function () {
+    document.getElementById("start-topic-input").value = (state && state.board.meta.topic) || "";
+    document.getElementById("start-rounds-input").value = 4;
+    document.getElementById("start-error").textContent = "";
+    document.getElementById("start-modal").classList.add("show");
+  });
+  document.getElementById("start-modal-cancel").addEventListener("click", function () {
+    document.getElementById("start-modal").classList.remove("show");
+  });
+  document.getElementById("start-modal").addEventListener("click", function (e) {
+    if (e.target.id === "start-modal") document.getElementById("start-modal").classList.remove("show");
+  });
+  document.getElementById("start-modal-ok").addEventListener("click", function () {
+    var topic = document.getElementById("start-topic-input").value.trim();
+    var rounds = parseInt(document.getElementById("start-rounds-input").value, 10) || 4;
+    var errEl = document.getElementById("start-error");
+    if (!topic) {
+      errEl.textContent = "お題を入力してください。";
+      document.getElementById("start-topic-input").focus();
+      return;
+    }
+    var enabledCount = ((state && state.participants) || []).filter(function (p) { return p.enabled; }).length;
+    if (enabledCount < 2) {
+      errEl.textContent = "ONの参加者が2人未満のため開始できません。";
+      return;
+    }
+    apiPost("/api/start", { topic: topic, maxRounds: rounds });
+    document.getElementById("start-modal").classList.remove("show");
+  });
+
+  document.getElementById("btn-pause").addEventListener("click", function () {
+    apiPost("/api/pause", {});
+  });
+  document.getElementById("btn-end").addEventListener("click", function () {
+    apiPost("/api/end", {});
+  });
+
+  // ------------------------------------------------------------------
+  // human ターン入力
+  // ------------------------------------------------------------------
+  document.getElementById("btn-say").addEventListener("click", function () {
+    var input = document.getElementById("human-input");
+    var text = input.value.trim();
+    if (!text) return;
+    apiPost("/api/say", { text: text });
+    input.value = "";
+  });
+  document.getElementById("human-input").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") document.getElementById("btn-say").click();
+  });
+  document.getElementById("btn-skip").addEventListener("click", function () {
+    apiPost("/api/skip", {});
+  });
+
+  // ------------------------------------------------------------------
+  // SSE
+  // ------------------------------------------------------------------
+  function connectEvents() {
+    if (MOCK || typeof EventSource === "undefined") return;
+    // 多重呼び出しガード: 既存接続は閉じてから張り直す
+    if (eventSource) {
+      try { eventSource.close(); } catch (err) {}
+      eventSource = null;
+    }
+    try {
+      eventSource = new EventSource("/api/events");
+      eventSource.onopen = function () {
+        if (sseDown) {
+          sseDown = false;
+          render();
+        }
+      };
+      eventSource.onmessage = function (e) {
+        var msg;
+        try { msg = JSON.parse(e.data); } catch (err) { return; }
+        if (msg.type === "update") {
+          fetchState().then(function (s) {
+            state = s;
+            render();
+          }).catch(function (err) {
+            console.error("state refetch failed", err);
+          });
+        } else if (msg.type === "await-human") {
+          if (state) {
+            state.awaitingHuman = { participantId: msg.participantId };
+            render();
+          }
+        }
+      };
+      eventSource.onerror = function () {
+        // ブラウザが自動再接続を試みる間、ステータスを「再接続中」に
+        if (!sseDown) {
+          sseDown = true;
+          var statusEl = document.getElementById("status-display");
+          statusEl.textContent = "再接続中…";
+          statusEl.className = "status-paused";
+        }
+      };
+    } catch (err) {
+      console.error("SSE connect failed", err);
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 起動
+  // ------------------------------------------------------------------
+  function detectMyParticipantId() {
+    if (!state || !state.participants) return null;
+    var humanP = state.participants.find(function (p) { return p.adapter === "human"; });
+    return humanP ? humanP.id : null;
+  }
+
+  // モックバッジクリックで実サーバへの復帰を試す
+  document.getElementById("mock-badge").addEventListener("click", function () {
+    fetchRealState().then(function (s) {
+      MOCK = false;
+      sseDown = false;
+      state = s;
+      myParticipantId = detectMyParticipantId();
+      document.getElementById("mock-badge").classList.remove("show");
+      render();
+      connectEvents();
+      showToast("サーバに接続しました");
+    }).catch(function () {
+      showToast("サーバに接続できません（モックモード継続）");
+    });
+  });
+
+  function init() {
+    fetchState().then(function (s) {
+      MOCK = false;
+      state = s;
+      myParticipantId = detectMyParticipantId();
+      render();
+      connectEvents();
+    }).catch(function (err) {
+      console.warn("サーバ未起動のためモックモードで動作します:", err);
+      MOCK = true;
+      document.getElementById("mock-badge").classList.add("show");
+      state = buildMockState();
+      myParticipantId = detectMyParticipantId();
+      render();
+    });
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
