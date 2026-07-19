@@ -187,6 +187,18 @@ test("buildClaudeArgs adds bypassPermissions for pcAccess full", () => {
   assert.deepEqual(args.slice(-2), ["--permission-mode", "bypassPermissions"]);
 });
 
+test("buildClaudeArgs adds --effort only when specified", () => {
+  const withEffort = buildClaudeArgs({ model: "sonnet", persona: "p", effort: "medium" });
+  assert.deepEqual(withEffort.slice(-2), ["--effort", "medium"]);
+  const without = buildClaudeArgs({ model: "sonnet", persona: "p" });
+  assert.ok(!without.includes("--effort"));
+});
+
+test("buildClaudeArgs combines effort and pcAccess full", () => {
+  const args = buildClaudeArgs({ model: "sonnet", persona: "p", effort: "high", pcAccess: "full" });
+  assert.deepEqual(args.slice(-4), ["--effort", "high", "--permission-mode", "bypassPermissions"]);
+});
+
 test("parseClaudeOutput extracts result field and parses nested JSON", () => {
   const envelope = JSON.stringify({
     result: JSON.stringify({ utterance: "こんにちは", pass: false }),
@@ -243,6 +255,18 @@ test("buildCodexArgs uses danger-full-access sandbox for pcAccess full", () => {
 test("buildCodexArgs appends -m when model is configured", () => {
   const args = buildCodexArgs({ schemaFilePath: "/tmp/s.json", cwd: "/tmp/wd", model: "o3" });
   assert.deepEqual(args.slice(-2), ["-m", "o3"]);
+});
+
+test("buildCodexArgs appends model_reasoning_effort only when effort is configured", () => {
+  const withEffort = buildCodexArgs({ schemaFilePath: "/tmp/s.json", cwd: "/tmp/wd", effort: "medium" });
+  assert.deepEqual(withEffort.slice(-2), ["-c", "model_reasoning_effort=medium"]);
+  const without = buildCodexArgs({ schemaFilePath: "/tmp/s.json", cwd: "/tmp/wd" });
+  assert.ok(!without.some((a) => a.startsWith("model_reasoning_effort=")));
+});
+
+test("buildCodexArgs combines model and effort (model first, then effort)", () => {
+  const args = buildCodexArgs({ schemaFilePath: "/tmp/s.json", cwd: "/tmp/wd", model: "o3", effort: "high" });
+  assert.deepEqual(args.slice(-4), ["-m", "o3", "-c", "model_reasoning_effort=high"]);
 });
 
 test("buildCodexInput prepends persona to the stdin prompt", () => {
@@ -427,6 +451,43 @@ test("buildGrokArgs uses bypassPermissions / 10 turns for pcAccess full", () => 
     pcAccess: "full",
   });
   assert.deepEqual(args.slice(-4), ["--permission-mode", "bypassPermissions", "--max-turns", "10"]);
+});
+
+test("buildGrokArgs appends -m only when model is configured", () => {
+  const base = { promptFilePath: "/tmp/p.txt", schemaJson: {}, cwd: "/tmp/wd" };
+  const withModel = buildGrokArgs({ ...base, model: "grok-4" });
+  assert.deepEqual(withModel.slice(-2), ["-m", "grok-4"]);
+  const without = buildGrokArgs(base);
+  assert.ok(!without.includes("-m"));
+});
+
+test("buildGrokArgs appends --reasoning-effort only when effort is configured", () => {
+  const base = { promptFilePath: "/tmp/p.txt", schemaJson: {}, cwd: "/tmp/wd" };
+  const withEffort = buildGrokArgs({ ...base, effort: "medium" });
+  assert.deepEqual(withEffort.slice(-2), ["--reasoning-effort", "medium"]);
+  const without = buildGrokArgs(base);
+  assert.ok(!without.includes("--reasoning-effort"));
+});
+
+test("buildGrokArgs combines model and effort after the pcAccess flags", () => {
+  const args = buildGrokArgs({
+    promptFilePath: "/tmp/p.txt",
+    schemaJson: {},
+    cwd: "/tmp/wd",
+    pcAccess: "full",
+    model: "grok-4",
+    effort: "high",
+  });
+  assert.deepEqual(args.slice(-8), [
+    "--permission-mode",
+    "bypassPermissions",
+    "--max-turns",
+    "10",
+    "-m",
+    "grok-4",
+    "--reasoning-effort",
+    "high",
+  ]);
 });
 
 test("parseGrokOutput prefers structuredOutput", () => {
@@ -766,9 +827,9 @@ test("validateConfig accepts the shipped config.example.json shape", () => {
     port: 8787,
     maxRounds: 4,
     participants: [
-      { id: "nagi", name: "凪", adapter: "claude", model: "sonnet", pcAccess: "read", enabled: true },
-      { id: "aki", name: "アキ", adapter: "codex", pcAccess: "read", enabled: true },
-      { id: "roki", name: "ロキ", adapter: "grok", pcAccess: "read", enabled: true },
+      { id: "nagi", name: "凪", adapter: "claude", model: "sonnet", effort: "medium", pcAccess: "read", enabled: true },
+      { id: "aki", name: "アキ", adapter: "codex", effort: "medium", pcAccess: "read", enabled: true },
+      { id: "roki", name: "ロキ", adapter: "grok", effort: "medium", pcAccess: "read", enabled: true },
       { id: "local", name: "ローカルLLM", adapter: "ollama", model: "qwen3", endpoint: "http://127.0.0.1:11434", enabled: false },
       { id: "you", name: "あなた", adapter: "human", enabled: false },
     ],
@@ -822,6 +883,49 @@ test("validateConfig accepts (and normalizes) pcAccess on non-CLI adapters too",
   });
   assert.equal(cfg.participants[0].pcAccess, "full");
   assert.equal(cfg.participants[1].pcAccess, "read");
+});
+
+// ---------------------------------------------------------------------------
+// config validation: effort
+// ---------------------------------------------------------------------------
+
+test("validateConfig accepts omitted effort and passes explicit effort through", () => {
+  const cfg = validateConfig({
+    participants: [
+      { id: "a", name: "A", adapter: "claude", enabled: true },
+      { id: "b", name: "B", adapter: "codex", effort: "medium", enabled: true },
+      // Deliberately not a claude/codex level name — values are passthrough,
+      // per-CLI validity is the CLI's own job.
+      { id: "c", name: "C", adapter: "grok", effort: "ultrathink", enabled: true },
+    ],
+  });
+  assert.equal(cfg.participants[0].effort, undefined);
+  assert.equal(cfg.participants[1].effort, "medium");
+  assert.equal(cfg.participants[2].effort, "ultrathink");
+});
+
+test("validateConfig rejects empty or non-string effort", () => {
+  for (const bad of ["", "   ", 3, true, null, {}]) {
+    assert.throws(
+      () =>
+        validateConfig({
+          participants: [{ id: "a", name: "A", adapter: "claude", effort: bad, enabled: true }],
+        }),
+      undefined,
+      `expected effort=${JSON.stringify(bad)} to be rejected`
+    );
+  }
+});
+
+test("validateConfig accepts effort on non-CLI adapters (ignored at runtime)", () => {
+  const cfg = validateConfig({
+    participants: [
+      { id: "local", name: "L", adapter: "ollama", endpoint: "http://127.0.0.1:11434", effort: "high", enabled: false },
+      { id: "you", name: "Y", adapter: "human", effort: "low", enabled: false },
+    ],
+  });
+  assert.equal(cfg.participants[0].effort, "high");
+  assert.equal(cfg.participants[1].effort, "low");
 });
 
 // ---------------------------------------------------------------------------

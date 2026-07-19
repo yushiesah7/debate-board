@@ -2,9 +2,9 @@
   "port": 8787,
   "maxRounds": 4,
   "participants": [
-    { "id": "nagi", "name": "凪", "adapter": "claude", "model": "sonnet", "pcAccess": "read", "enabled": true },
-    { "id": "aki", "name": "アキ", "adapter": "codex", "pcAccess": "read", "enabled": true },
-    { "id": "roki", "name": "ロキ", "adapter": "grok", "pcAccess": "read", "enabled": true },
+    { "id": "nagi", "name": "凪", "adapter": "claude", "model": "sonnet", "effort": "medium", "pcAccess": "read", "enabled": true },
+    { "id": "aki", "name": "アキ", "adapter": "codex", "effort": "medium", "pcAccess": "read", "enabled": true },
+    { "id": "roki", "name": "ロキ", "adapter": "grok", "effort": "medium", "pcAccess": "read", "enabled": true },
     { "id": "local", "name": "ローカルLLM", "adapter": "ollama", "model": "qwen3", "endpoint": "http://127.0.0.1:11434", "enabled": false },
     { "id": "you", "name": "あなた", "adapter": "human", "enabled": false }
   ]

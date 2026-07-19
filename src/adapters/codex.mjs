@@ -33,10 +33,15 @@ import {
  * - "read": adds `--sandbox read-only` — the AI can only look at the PC.
  * - "full": adds `--sandbox danger-full-access` — read/write/execute without
  *   sandboxing. Explicit opt-in, at the user's own risk.
- * @param {{schemaFilePath:string, cwd:string, model?:string, pcAccess?:"read"|"full"}} opts
+ *
+ * effort (config, optional): adds `-c model_reasoning_effort=<level>` only
+ * when specified; omitted = inherit the user's codex config default. Passed
+ * through verbatim — an invalid level is rejected by the CLI/backend and
+ * surfaces via the adapter's pass+error path.
+ * @param {{schemaFilePath:string, cwd:string, model?:string, pcAccess?:"read"|"full", effort?:string}} opts
  * @returns {string[]}
  */
-export function buildCodexArgs({ schemaFilePath, cwd, model, pcAccess }) {
+export function buildCodexArgs({ schemaFilePath, cwd, model, pcAccess, effort }) {
   const args = [
     "exec",
     "--json",
@@ -56,6 +61,7 @@ export function buildCodexArgs({ schemaFilePath, cwd, model, pcAccess }) {
     pcAccess === "full" ? "danger-full-access" : "read-only",
   ];
   if (model) args.push("-m", model);
+  if (effort) args.push("-c", `model_reasoning_effort=${effort}`);
   return args;
 }
 
@@ -215,6 +221,7 @@ export async function speak(ctx) {
           cwd,
           model: participant?.model,
           pcAccess: participant?.pcAccess,
+          effort: participant?.effort,
         });
         const result = await runProcess({
           command,

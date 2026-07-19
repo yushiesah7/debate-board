@@ -18,6 +18,11 @@
 参加者は `config.json` で自由に定義する（人数・種類とも可変）。
 各参加者: `{id, name, adapter, model?, endpoint?, persona?, enabled, pcAccess?}`。ターン順は配列順。
 
+### model / effort（CLI系は参加者ごとに指定可）
+
+- `model`: claude `--model` / codex `-m` / grok `-m` に渡す。未指定=各CLIの既定を継承
+- `effort`: claude `--effort` / codex `-c model_reasoning_effort=` / grok `--reasoning-effort` に渡す。未指定=CLI既定。有効値はCLIごとに異なるためパススルー（不正値はそのターンが pass+error になり発言ログで可視化）
+
 ### pcAccess（CLI系アダプタのPCアクセス度合い）
 
 | 値 | 意味 | claude | codex | grok |

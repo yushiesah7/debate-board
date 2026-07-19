@@ -18,6 +18,14 @@
  *   at-your-own-risk opt-in. Only meaningful for CLI adapters (claude/codex/
  *   grok); ollama, openai-compat and human have no PC access at all, so the
  *   value is accepted but ignored for them.
+ * @property {string} [effort]
+ *   Reasoning-effort level, passed through to the CLI verbatim
+ *   (claude `--effort`, codex `-c model_reasoning_effort=`, grok
+ *   `--reasoning-effort`). Validation here only requires a non-empty string
+ *   when present — the set of valid levels differs per CLI, so the value is
+ *   NOT checked against a whitelist; if a CLI rejects it, the failure
+ *   surfaces through the adapter's normal pass+error path. Omitted =
+ *   inherit each CLI's own default. Ignored by ollama/openai-compat/human.
  *
  * @typedef {object} Config
  * @property {number} port
@@ -143,6 +151,17 @@ export function validateConfig(raw) {
         );
       }
       pcAccess = participant.pcAccess;
+    }
+
+    // effort: optional; when present it must be a non-empty string. Values
+    // are passed through to the CLI as-is (per-CLI level sets differ; an
+    // invalid level is surfaced by the CLI via the pass+error path).
+    if (participant.effort !== undefined) {
+      if (typeof participant.effort !== "string" || participant.effort.trim() === "") {
+        throw new Error(
+          `participant "${participant.id}" effort must be a non-empty string when specified (got ${JSON.stringify(participant.effort)})`
+        );
+      }
     }
 
     // enabled: default true; if present it must be a real boolean.

@@ -26,13 +26,21 @@ import {
  *   only look at the PC.
  * - "full": adds `--permission-mode bypassPermissions` — read/write/execute
  *   without approval. Explicit opt-in, at the user's own risk.
- * @param {{model?:string, persona?:string, pcAccess?:"read"|"full"}} participant
+ *
+ * effort (config, optional): adds `--effort <level>` only when specified;
+ * omitted = inherit the CLI's own default. The value is passed through
+ * verbatim — an invalid level is rejected by the CLI itself and surfaces
+ * via the adapter's pass+error path.
+ * @param {{model?:string, persona?:string, pcAccess?:"read"|"full", effort?:string}} participant
  * @returns {string[]}
  */
 export function buildClaudeArgs(participant) {
   const model = participant?.model ?? "";
   const persona = participant?.persona ?? "";
   const args = ["-p", "--output-format", "json", "--model", model, "--system-prompt", persona];
+  if (participant?.effort) {
+    args.push("--effort", participant.effort);
+  }
   if (participant?.pcAccess === "full") {
     args.push("--permission-mode", "bypassPermissions");
   }

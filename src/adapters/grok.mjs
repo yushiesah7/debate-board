@@ -38,12 +38,19 @@ import {
  *   at the PC) with `--max-turns 6` to leave room for read-tool round trips.
  * - "full": `--permission-mode bypassPermissions` (read/write/execute without
  *   approval — explicit opt-in, at the user's own risk) with `--max-turns 10`.
- * @param {{promptFilePath:string, schemaJson:object, persona?:string, cwd:string, pcAccess?:"read"|"full"}} opts
+ *
+ * model (config, optional): adds `-m <model>` only when specified; omitted =
+ * inherit grok's own default model.
+ * effort (config, optional): adds `--reasoning-effort <level>` only when
+ * specified; omitted = inherit grok's default. Passed through verbatim — an
+ * invalid level is rejected by the CLI and surfaces via the adapter's
+ * pass+error path.
+ * @param {{promptFilePath:string, schemaJson:object, persona?:string, cwd:string, pcAccess?:"read"|"full", model?:string, effort?:string}} opts
  * @returns {string[]}
  */
-export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd, pcAccess }) {
+export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd, pcAccess, model, effort }) {
   const full = pcAccess === "full";
-  return [
+  const args = [
     "--prompt-file",
     promptFilePath,
     "--json-schema",
@@ -61,6 +68,9 @@ export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd, pcAcce
     "--max-turns",
     full ? "10" : "6",
   ];
+  if (model) args.push("-m", model);
+  if (effort) args.push("--reasoning-effort", effort);
+  return args;
 }
 
 /**
@@ -103,6 +113,8 @@ export async function speak(ctx) {
           persona: participant?.persona,
           cwd,
           pcAccess: participant?.pcAccess,
+          model: participant?.model,
+          effort: participant?.effort,
         });
         const result = await runProcess({
           command,
