@@ -1,5 +1,17 @@
 # debate-board PROGRESS
 
+## 2026-07-20 (2) pcAccess・model/effort・参加者設定GUI（記録者: 凪)
+
+- 何を変えたか:
+  - `pcAccess`（read既定/full）: 参加AIのPCアクセス度合いを参加者ごとに選択制に（read=ファイル参照可・書込不可、full=明示オプトイン）。grokのmax-turnsをread=6/full=10へ
+  - `model`/`effort` を全CLIアダプタで参加者ごとに指定可能に（grokはmodel対応自体が新規）。config.exampleにeffort:"medium"を推奨明示
+  - 参加者設定GUI: 各チップ⚙→モーダル（datalist候補+自由入力）、POST /api/participant 新設、config.jsonへ原子的永続化、実行中は次ターン反映
+  - 既存バグ2件修正: createDebateのpcAccess/effort引継ぎ漏れ（実行時に効かない）、8787の残存サーバプロセス掃除
+  - 検証: テスト131件全緑、実CLIスモーク3種、effort有効での実3AI議論完走、APIライブ確認（POST反映＋config永続化）
+- 意図的に触らなかったもの: web検索の開閉オプション（pcAccessとは別軸。要望があれば追加）、/api/toggleの404/400不整合（既存仕様のまま）
+- 完了・未完了: 完了。push済み（main 0aa2bd6）
+- 次に確認すべきこと: ブラウザで⚙モーダルの操作感（yushiさん）。M3候補: 履歴閲覧・サマリMarkdownエクスポート・web検索トグル
+
 ## 2026-07-20 M1/M2完成 — 実3AI議論の完走（記録者: 凪）
 
 - 何を変えたか:
