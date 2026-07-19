@@ -2,13 +2,19 @@
 /**
  * Grok CLI adapter.
  * Spawns:
- *   grok -p <promptText> --json-schema <inline JSON> --output-format json
- *        --system-prompt-override <persona> --cwd <tmpdir> --no-memory
- *        --disable-web-search --permission-mode dontAsk --max-turns 3
- * The prompt is passed as an argument (not stdin) per spec. The response is
- * a single JSON object; `structuredOutput` is preferred, falling back to
- * parsing the free-form `text` field.
+ *   grok --prompt-file <tmp/prompt.txt> --json-schema <inline JSON>
+ *        --output-format json --system-prompt-override <persona>
+ *        --cwd <tmpdir> --no-memory --disable-web-search
+ *        --permission-mode dontAsk --max-turns 3
+ * The prompt is written to a temp file and passed via `--prompt-file`
+ * (verified real flag in `grok --help`) instead of an argv literal — this
+ * avoids the Windows command-line length limit for long board prompts.
+ * The response is a single JSON object; `structuredOutput` is preferred,
+ * falling back to parsing the free-form `text` field.
  */
+
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   resolveCommand,
@@ -17,18 +23,20 @@ import {
   parseModelJson,
   normalizeTurnResult,
   makeTempDir,
+  removeDirQuietly,
+  failResult,
   DEFAULT_TIMEOUT_MS,
 } from "./util.mjs";
 
 /**
  * Pure argv builder — unit-testable without spawning anything.
- * @param {{promptText:string, schemaJson:object, persona?:string, cwd:string}} opts
+ * @param {{promptFilePath:string, schemaJson:object, persona?:string, cwd:string}} opts
  * @returns {string[]}
  */
-export function buildGrokArgs({ promptText, schemaJson, persona, cwd }) {
+export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd }) {
   return [
-    "-p",
-    promptText,
+    "--prompt-file",
+    promptFilePath,
     "--json-schema",
     JSON.stringify(schemaJson ?? {}),
     "--output-format",
@@ -71,25 +79,41 @@ export function parseGrokOutput(stdout) {
  * @returns {Promise<import('./util.mjs').TurnResult>}
  */
 export async function speak(ctx) {
-  const { participant, promptText, schemaJson } = ctx;
-  const command = resolveCommand("grok");
+  try {
+    const { participant, promptText, schemaJson } = ctx;
+    const command = resolveCommand("grok");
 
-  return runWithRetry(async () => {
-    const cwd = makeTempDir("debate-board-grok-");
-    const args = buildGrokArgs({ promptText, schemaJson, persona: participant?.persona, cwd });
-    const result = await runProcess({
-      command,
-      args,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-      cwd,
-    });
-    if (result.spawnError) throw result.spawnError;
-    if (result.timedOut) throw new Error("grok adapter: timed out");
-    if (result.code !== 0) {
-      throw new Error(
-        `grok adapter: exited with code ${result.code}: ${result.stderr.slice(0, 500)}`
-      );
-    }
-    return parseGrokOutput(result.stdout);
-  }, 1);
+    return await runWithRetry(async () => {
+      const cwd = makeTempDir("debate-board-grok-");
+      try {
+        const promptFilePath = path.join(cwd, "prompt.txt");
+        fs.writeFileSync(promptFilePath, promptText, "utf8");
+        const args = buildGrokArgs({
+          promptFilePath,
+          schemaJson,
+          persona: participant?.persona,
+          cwd,
+        });
+        const result = await runProcess({
+          command,
+          args,
+          timeoutMs: DEFAULT_TIMEOUT_MS,
+          cwd,
+        });
+        if (result.spawnError) throw result.spawnError;
+        if (result.timedOut) throw new Error("grok adapter: timed out");
+        if (result.code !== 0) {
+          throw new Error(
+            `grok adapter: exited with code ${result.code}: ${result.stderr.slice(0, 500)}`
+          );
+        }
+        return parseGrokOutput(result.stdout);
+      } finally {
+        removeDirQuietly(cwd);
+      }
+    }, 1);
+  } catch (err) {
+    // Belt and braces: no code path may throw out of an adapter.
+    return failResult(err);
+  }
 }

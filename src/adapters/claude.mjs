@@ -13,6 +13,7 @@ import {
   runWithRetry,
   parseModelJson,
   normalizeTurnResult,
+  failResult,
   DEFAULT_TIMEOUT_MS,
 } from "./util.mjs";
 
@@ -50,24 +51,29 @@ export function parseClaudeOutput(stdout) {
  * @returns {Promise<import('./util.mjs').TurnResult>}
  */
 export async function speak(ctx) {
-  const { participant, promptText } = ctx;
-  const command = resolveCommand("claude");
-  const args = buildClaudeArgs(participant);
+  try {
+    const { participant, promptText } = ctx;
+    const command = resolveCommand("claude");
+    const args = buildClaudeArgs(participant);
 
-  return runWithRetry(async () => {
-    const result = await runProcess({
-      command,
-      args,
-      input: promptText,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-    });
-    if (result.spawnError) throw result.spawnError;
-    if (result.timedOut) throw new Error("claude adapter: timed out");
-    if (result.code !== 0) {
-      throw new Error(
-        `claude adapter: exited with code ${result.code}: ${result.stderr.slice(0, 500)}`
-      );
-    }
-    return parseClaudeOutput(result.stdout);
-  }, 1);
+    return await runWithRetry(async () => {
+      const result = await runProcess({
+        command,
+        args,
+        input: promptText,
+        timeoutMs: DEFAULT_TIMEOUT_MS,
+      });
+      if (result.spawnError) throw result.spawnError;
+      if (result.timedOut) throw new Error("claude adapter: timed out");
+      if (result.code !== 0) {
+        throw new Error(
+          `claude adapter: exited with code ${result.code}: ${result.stderr.slice(0, 500)}`
+        );
+      }
+      return parseClaudeOutput(result.stdout);
+    }, 1);
+  } catch (err) {
+    // Belt and braces: no code path may throw out of an adapter.
+    return failResult(err);
+  }
 }

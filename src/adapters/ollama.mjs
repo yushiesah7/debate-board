@@ -8,10 +8,12 @@
  */
 
 import {
-  fetchWithTimeout,
+  fetchJson,
+  normalizeEndpoint,
   parseModelJson,
   normalizeTurnResult,
   runWithRetry,
+  failResult,
   DEFAULT_TIMEOUT_MS,
 } from "./util.mjs";
 
@@ -51,24 +53,17 @@ export function parseOllamaResponse(data) {
  * @returns {Promise<import('./util.mjs').TurnResult>}
  */
 export async function speak(ctx) {
-  const { participant, promptText, schemaJson } = ctx;
-  const url = `${participant.endpoint}/api/chat`;
-  const body = buildOllamaRequestBody(participant, promptText, schemaJson);
+  try {
+    const { participant, promptText, schemaJson } = ctx;
+    const url = `${normalizeEndpoint(participant.endpoint)}/api/chat`;
+    const body = buildOllamaRequestBody(participant, promptText, schemaJson);
 
-  return runWithRetry(async () => {
-    const res = await fetchWithTimeout(
-      url,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      DEFAULT_TIMEOUT_MS
-    );
-    if (!res.ok) {
-      throw new Error(`ollama adapter: HTTP ${res.status} ${res.statusText}`);
-    }
-    const data = await res.json();
-    return parseOllamaResponse(data);
-  }, 1);
+    return await runWithRetry(async () => {
+      const data = await fetchJson(url, body, DEFAULT_TIMEOUT_MS);
+      return parseOllamaResponse(data);
+    }, 1);
+  } catch (err) {
+    // Belt and braces: no code path may throw out of an adapter.
+    return failResult(err);
+  }
 }

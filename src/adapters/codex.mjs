@@ -19,16 +19,20 @@ import {
   parseModelJson,
   normalizeTurnResult,
   makeTempDir,
+  removeDirQuietly,
+  failResult,
   DEFAULT_TIMEOUT_MS,
 } from "./util.mjs";
 
 /**
  * Pure argv builder — unit-testable without spawning anything.
- * @param {{schemaFilePath:string, cwd:string}} opts
+ * `model` maps to `codex exec -m/--model <MODEL>` (verified in
+ * `codex exec --help`, codex 0.144.x) and is omitted when not configured.
+ * @param {{schemaFilePath:string, cwd:string, model?:string}} opts
  * @returns {string[]}
  */
-export function buildCodexArgs({ schemaFilePath, cwd }) {
-  return [
+export function buildCodexArgs({ schemaFilePath, cwd, model }) {
+  const args = [
     "exec",
     "--json",
     "--output-schema",
@@ -44,6 +48,19 @@ export function buildCodexArgs({ schemaFilePath, cwd }) {
     "-c",
     "mcp_servers={}",
   ];
+  if (model) args.push("-m", model);
+  return args;
+}
+
+/**
+ * codex exec has no --system-prompt equivalent, so the persona is prepended
+ * to the stdin prompt instead. Pure + unit-testable.
+ * @param {string|undefined} persona
+ * @param {string} promptText
+ * @returns {string}
+ */
+export function buildCodexInput(persona, promptText) {
+  return persona ? `${persona}\n\n${promptText}` : promptText;
 }
 
 /**
@@ -176,29 +193,38 @@ export function parseCodexOutput(stdout) {
  * @returns {Promise<import('./util.mjs').TurnResult>}
  */
 export async function speak(ctx) {
-  const { promptText, schemaJson } = ctx;
-  const command = resolveCommand("codex");
+  try {
+    const { participant, promptText, schemaJson } = ctx;
+    const command = resolveCommand("codex");
 
-  return runWithRetry(async () => {
-    const cwd = makeTempDir("debate-board-codex-");
-    const schemaFilePath = path.join(cwd, "output-schema.json");
-    fs.writeFileSync(schemaFilePath, JSON.stringify(schemaJson ?? {}, null, 2), "utf8");
+    return await runWithRetry(async () => {
+      const cwd = makeTempDir("debate-board-codex-");
+      try {
+        const schemaFilePath = path.join(cwd, "output-schema.json");
+        fs.writeFileSync(schemaFilePath, JSON.stringify(schemaJson ?? {}, null, 2), "utf8");
 
-    const args = buildCodexArgs({ schemaFilePath, cwd });
-    const result = await runProcess({
-      command,
-      args,
-      input: promptText,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-      cwd,
-    });
-    if (result.spawnError) throw result.spawnError;
-    if (result.timedOut) throw new Error("codex adapter: timed out");
-    if (result.code !== 0) {
-      throw new Error(
-        `codex adapter: exited with code ${result.code}: ${result.stderr.slice(0, 500)}`
-      );
-    }
-    return parseCodexOutput(result.stdout);
-  }, 1);
+        const args = buildCodexArgs({ schemaFilePath, cwd, model: participant?.model });
+        const result = await runProcess({
+          command,
+          args,
+          input: buildCodexInput(participant?.persona, promptText),
+          timeoutMs: DEFAULT_TIMEOUT_MS,
+          cwd,
+        });
+        if (result.spawnError) throw result.spawnError;
+        if (result.timedOut) throw new Error("codex adapter: timed out");
+        if (result.code !== 0) {
+          throw new Error(
+            `codex adapter: exited with code ${result.code}: ${result.stderr.slice(0, 500)}`
+          );
+        }
+        return parseCodexOutput(result.stdout);
+      } finally {
+        removeDirQuietly(cwd);
+      }
+    }, 1);
+  } catch (err) {
+    // Belt and braces: no code path may throw out of an adapter.
+    return failResult(err);
+  }
 }

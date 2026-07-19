@@ -23,16 +23,22 @@ export function makeHuman(bridge) {
     async speak(ctx) {
       try {
         const outcome = await bridge.wait(ctx.participant.id, HUMAN_TIMEOUT_MS);
-        if (!outcome || "skip" in outcome) {
+        // Strict skip check: only a literal `skip: true` counts as a skip —
+        // a stray truthy `skip` property must not silently drop a turn.
+        if (outcome && /** @type {any} */ (outcome).skip === true) {
           return { utterance: "", cardOps: [], noteUpdate: null, pass: true, error: null };
         }
-        return {
-          utterance: typeof outcome.text === "string" ? outcome.text : "",
-          cardOps: [],
-          noteUpdate: null,
-          pass: false,
-          error: null,
-        };
+        if (outcome && typeof (/** @type {any} */ (outcome).text) === "string") {
+          return {
+            utterance: /** @type {any} */ (outcome).text,
+            cardOps: [],
+            noteUpdate: null,
+            pass: false,
+            error: null,
+          };
+        }
+        // Anything else (null / malformed outcome) is treated as a pass.
+        return { utterance: "", cardOps: [], noteUpdate: null, pass: true, error: null };
       } catch (err) {
         return failResult(err);
       }

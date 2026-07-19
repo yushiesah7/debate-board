@@ -8,7 +8,9 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import test from "node:test";
 
 import {
@@ -17,11 +19,21 @@ import {
   parseModelJson,
   stripCodeFence,
   resolveCommand,
+  runProcess,
+  normalizeEndpoint,
+  removeDirQuietly,
+  makeTempDir,
+  MAX_OUTPUT_BYTES,
 } from "../src/adapters/util.mjs";
 
 import { buildClaudeArgs, parseClaudeOutput } from "../src/adapters/claude.mjs";
-import { buildCodexArgs, parseCodexOutput } from "../src/adapters/codex.mjs";
-import { buildGrokArgs, parseGrokOutput } from "../src/adapters/grok.mjs";
+import {
+  buildCodexArgs,
+  buildCodexInput,
+  parseCodexOutput,
+  speak as codexSpeak,
+} from "../src/adapters/codex.mjs";
+import { buildGrokArgs, parseGrokOutput, speak as grokSpeak } from "../src/adapters/grok.mjs";
 import {
   buildOllamaRequestBody,
   parseOllamaResponse,
@@ -208,6 +220,17 @@ test("buildCodexArgs builds expected argv (incl. MCP disable)", () => {
   ]);
 });
 
+test("buildCodexArgs appends -m when model is configured", () => {
+  const args = buildCodexArgs({ schemaFilePath: "/tmp/s.json", cwd: "/tmp/wd", model: "o3" });
+  assert.deepEqual(args.slice(-2), ["-m", "o3"]);
+});
+
+test("buildCodexInput prepends persona to the stdin prompt", () => {
+  assert.equal(buildCodexInput("ペルソナ", "本文"), "ペルソナ\n\n本文");
+  assert.equal(buildCodexInput(undefined, "本文"), "本文");
+  assert.equal(buildCodexInput("", "本文"), "本文");
+});
+
 test("parseCodexOutput extracts agent_message from real envelope JSONL", () => {
   // Fixture matches the real codex CLI envelope (verified 2026-07-20).
   const jsonl = [
@@ -335,16 +358,16 @@ test("parseCodexOutput throws on empty output", () => {
 // grok adapter: argv + output parsing (no real spawn)
 // ---------------------------------------------------------------------------
 
-test("buildGrokArgs builds expected argv", () => {
+test("buildGrokArgs builds expected argv (prompt via --prompt-file)", () => {
   const args = buildGrokArgs({
-    promptText: "お題です",
+    promptFilePath: "/tmp/grokwd/prompt.txt",
     schemaJson: { type: "object" },
     persona: "ロキです",
     cwd: "/tmp/grokwd",
   });
   assert.deepEqual(args, [
-    "-p",
-    "お題です",
+    "--prompt-file",
+    "/tmp/grokwd/prompt.txt",
     "--json-schema",
     JSON.stringify({ type: "object" }),
     "--output-format",
@@ -468,6 +491,33 @@ test("ollama speak() returns pass+error on HTTP error status", async () => {
     const result = await ollamaSpeak(ctx);
     assert.equal(result.pass, true);
     assert.notEqual(result.error, null);
+    // Error must carry a snippet of the response body for diagnosis.
+    assert.match(String(result.error), /internal error/);
+  } finally {
+    server.close();
+  }
+});
+
+test("ollama speak() strips trailing slashes from endpoint", async () => {
+  /** @type {string[]} */
+  const seenUrls = [];
+  const server = http.createServer((req, res) => {
+    seenUrls.push(req.url ?? "");
+    req.on("data", () => {});
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ message: { content: '{"utterance":"ok"}' } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = /** @type {any} */ (server.address());
+    const ctx = makeCtx({
+      participant: { id: "local", name: "ローカル", adapter: "ollama", model: "qwen3", endpoint: `http://127.0.0.1:${port}///` },
+    });
+    const result = await ollamaSpeak(ctx);
+    assert.equal(result.utterance, "ok");
+    assert.deepEqual(seenUrls, ["/api/chat"]);
   } finally {
     server.close();
   }
@@ -680,4 +730,218 @@ test("validateConfig accepts the shipped config.example.json shape", () => {
     ],
   });
   assert.equal(cfg.participants.length, 5);
+});
+
+// ---------------------------------------------------------------------------
+// config validation: strengthened rules (endpoint / port / maxRounds / name /
+// enabled / human count)
+// ---------------------------------------------------------------------------
+
+test("validateConfig requires endpoint for ollama/openai-compat", () => {
+  assert.throws(() =>
+    validateConfig({
+      participants: [{ id: "a", name: "A", adapter: "ollama", model: "m", enabled: true }],
+    })
+  );
+  assert.throws(() =>
+    validateConfig({
+      participants: [{ id: "a", name: "A", adapter: "openai-compat", model: "m", endpoint: "", enabled: true }],
+    })
+  );
+});
+
+test("validateConfig rejects unparsable endpoint URLs", () => {
+  assert.throws(() =>
+    validateConfig({
+      participants: [{ id: "a", name: "A", adapter: "ollama", endpoint: "not a url", enabled: true }],
+    })
+  );
+});
+
+test("validateConfig rejects invalid port values", () => {
+  const participants = [{ id: "a", name: "A", adapter: "claude", enabled: true }];
+  assert.throws(() => validateConfig({ port: 0, participants }));
+  assert.throws(() => validateConfig({ port: 65536, participants }));
+  assert.throws(() => validateConfig({ port: 3.5, participants }));
+  assert.throws(() => validateConfig({ port: "8787", participants }));
+});
+
+test("validateConfig rejects invalid maxRounds values", () => {
+  const participants = [{ id: "a", name: "A", adapter: "claude", enabled: true }];
+  assert.throws(() => validateConfig({ maxRounds: 0, participants }));
+  assert.throws(() => validateConfig({ maxRounds: 2.5, participants }));
+  assert.throws(() => validateConfig({ maxRounds: "4", participants }));
+});
+
+test("validateConfig requires a non-empty participant name", () => {
+  assert.throws(() =>
+    validateConfig({ participants: [{ id: "a", adapter: "claude", enabled: true }] })
+  );
+  assert.throws(() =>
+    validateConfig({ participants: [{ id: "a", name: "", adapter: "claude", enabled: true }] })
+  );
+});
+
+test("validateConfig defaults enabled to true and rejects non-boolean", () => {
+  const cfg = validateConfig({
+    participants: [{ id: "a", name: "A", adapter: "claude" }],
+  });
+  assert.equal(cfg.participants[0].enabled, true);
+  assert.throws(() =>
+    validateConfig({ participants: [{ id: "a", name: "A", adapter: "claude", enabled: "yes" }] })
+  );
+});
+
+test("validateConfig allows at most one human participant", () => {
+  assert.throws(() =>
+    validateConfig({
+      participants: [
+        { id: "h1", name: "H1", adapter: "human", enabled: true },
+        { id: "h2", name: "H2", adapter: "human", enabled: true },
+      ],
+    })
+  );
+});
+
+// ---------------------------------------------------------------------------
+// human adapter: strict skip semantics
+// ---------------------------------------------------------------------------
+
+test("human speak() only skips on literal skip === true", async () => {
+  // A truthy-but-not-true skip with no text is treated as a pass (malformed
+  // outcome), never as an utterance; and it must not crash.
+  const bridge = { wait: async () => /** @type {any} */ ({ skip: 1 }) };
+  const { speak } = makeHuman(bridge);
+  const result = await speak(makeCtx({ participant: { id: "you", name: "あなた", adapter: "human" } }));
+  assert.equal(result.pass, true);
+  assert.equal(result.utterance, "");
+});
+
+test("human speak() prefers text when skip is not literally true", async () => {
+  const bridge = { wait: async () => /** @type {any} */ ({ skip: 0, text: "発言します" }) };
+  const { speak } = makeHuman(bridge);
+  const result = await speak(makeCtx({ participant: { id: "you", name: "あなた", adapter: "human" } }));
+  assert.equal(result.utterance, "発言します");
+  assert.equal(result.pass, false);
+});
+
+// ---------------------------------------------------------------------------
+// util: endpoint normalization
+// ---------------------------------------------------------------------------
+
+test("normalizeEndpoint strips trailing slashes only", () => {
+  assert.equal(normalizeEndpoint("http://127.0.0.1:11434/"), "http://127.0.0.1:11434");
+  assert.equal(normalizeEndpoint("http://127.0.0.1:11434///"), "http://127.0.0.1:11434");
+  assert.equal(normalizeEndpoint("http://127.0.0.1:11434"), "http://127.0.0.1:11434");
+  assert.equal(normalizeEndpoint("http://host/base/path/"), "http://host/base/path");
+});
+
+// ---------------------------------------------------------------------------
+// util: runProcess timeout / kill / output-cap behavior (real short-lived
+// node child processes; no external CLIs)
+// ---------------------------------------------------------------------------
+
+test("runProcess resolves with timedOut when the child outlives the timeout", async () => {
+  const started = Date.now();
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", "setInterval(() => {}, 1000);"],
+    timeoutMs: 300,
+  });
+  assert.equal(result.timedOut, true);
+  // Must resolve promptly (kill or grace timer), never hang.
+  assert.ok(Date.now() - started < 10_000);
+});
+
+test("runProcess caps runaway output and surfaces an error", async () => {
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", 'process.stdout.write("x".repeat(3 * 1024 * 1024));'],
+    timeoutMs: 30_000,
+  });
+  assert.ok(result.spawnError, "expected an output-limit error");
+  assert.match(String(result.spawnError.message), /exceeded/);
+  assert.ok(result.stdout.length <= MAX_OUTPUT_BYTES);
+});
+
+test("runProcess survives a child that exits before stdin is consumed (EPIPE)", async () => {
+  // Large input into an immediately-exiting child; without stdin error
+  // handlers this can crash the whole process with an uncaught EPIPE.
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", "process.exit(0);"],
+    input: "y".repeat(1024 * 1024),
+    timeoutMs: 30_000,
+  });
+  assert.equal(result.timedOut, false);
+  // Either a clean exit or an EPIPE-ish spawn error is fine; the contract is
+  // simply that the promise resolves and nothing throws.
+  assert.ok(result.code === 0 || result.spawnError);
+});
+
+test("runProcess resolves with spawnError for a nonexistent command", async () => {
+  const result = await runProcess({
+    command: "definitely-not-a-real-command-debate-board",
+    args: [],
+    timeoutMs: 5_000,
+  });
+  assert.ok(result.spawnError);
+});
+
+// ---------------------------------------------------------------------------
+// util: temp dir helpers + adapter temp cleanup on failure
+// ---------------------------------------------------------------------------
+
+test("removeDirQuietly removes a dir and never throws", () => {
+  const dir = makeTempDir("debate-board-testrm-");
+  assert.ok(fs.existsSync(dir));
+  removeDirQuietly(dir);
+  assert.ok(!fs.existsSync(dir));
+  // Second call (already gone) and garbage input must not throw.
+  removeDirQuietly(dir);
+  removeDirQuietly(null);
+});
+
+function countTempDirs(prefix) {
+  return fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(prefix)).length;
+}
+
+test("codex speak() cleans up its temp dirs even when spawn fails", async () => {
+  const before = countTempDirs("debate-board-codex-");
+  const oldPath = process.env.PATH;
+  process.env.PATH = ""; // force ENOENT without touching any real CLI
+  try {
+    const result = await codexSpeak(makeCtx({ participant: { id: "aki", name: "アキ", adapter: "codex" } }));
+    assert.equal(result.pass, true);
+    assert.notEqual(result.error, null);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+  assert.equal(countTempDirs("debate-board-codex-"), before);
+});
+
+test("grok speak() cleans up its temp dirs even when spawn fails", async () => {
+  const before = countTempDirs("debate-board-grok-");
+  const oldPath = process.env.PATH;
+  process.env.PATH = ""; // force ENOENT without touching any real CLI
+  try {
+    const result = await grokSpeak(makeCtx({ participant: { id: "roki", name: "ロキ", adapter: "grok", persona: "x" } }));
+    assert.equal(result.pass, true);
+    assert.notEqual(result.error, null);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+  assert.equal(countTempDirs("debate-board-grok-"), before);
+});
+
+// ---------------------------------------------------------------------------
+// adapters never throw, even on malformed ctx (outer try/catch guard)
+// ---------------------------------------------------------------------------
+
+test("speak() returns failResult instead of throwing on malformed ctx", async () => {
+  for (const speak of [codexSpeak, grokSpeak, ollamaSpeak, oaiSpeak]) {
+    const result = await speak(/** @type {any} */ (null));
+    assert.equal(result.pass, true);
+    assert.notEqual(result.error, null);
+  }
 });

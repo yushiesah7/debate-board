@@ -9,10 +9,12 @@
  */
 
 import {
-  fetchWithTimeout,
+  fetchJson,
+  normalizeEndpoint,
   parseModelJson,
   normalizeTurnResult,
   runWithRetry,
+  failResult,
   DEFAULT_TIMEOUT_MS,
 } from "./util.mjs";
 
@@ -51,24 +53,17 @@ export function parseOaiResponse(data) {
  * @returns {Promise<import('./util.mjs').TurnResult>}
  */
 export async function speak(ctx) {
-  const { participant, promptText } = ctx;
-  const url = `${participant.endpoint}/v1/chat/completions`;
-  const body = buildOaiRequestBody(participant, promptText);
+  try {
+    const { participant, promptText } = ctx;
+    const url = `${normalizeEndpoint(participant.endpoint)}/v1/chat/completions`;
+    const body = buildOaiRequestBody(participant, promptText);
 
-  return runWithRetry(async () => {
-    const res = await fetchWithTimeout(
-      url,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      DEFAULT_TIMEOUT_MS
-    );
-    if (!res.ok) {
-      throw new Error(`oai adapter: HTTP ${res.status} ${res.statusText}`);
-    }
-    const data = await res.json();
-    return parseOaiResponse(data);
-  }, 1);
+    return await runWithRetry(async () => {
+      const data = await fetchJson(url, body, DEFAULT_TIMEOUT_MS);
+      return parseOaiResponse(data);
+    }, 1);
+  } catch (err) {
+    // Belt and braces: no code path may throw out of an adapter.
+    return failResult(err);
+  }
 }

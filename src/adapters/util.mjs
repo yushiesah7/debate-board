@@ -138,9 +138,57 @@ function existsAsFile(p) {
  * @property {Error|null} spawnError
  */
 
+/** Hard cap on captured stdout+stderr (each), to bound memory. */
+export const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+
+/** Grace period after a kill before force-resolving the promise. */
+const KILL_GRACE_MS = 2500;
+
+/**
+ * Kill a child process and its whole tree. On Windows, `child.kill()` only
+ * signals the direct child (CLI shims often spawn a node subprocess that
+ * survives), so use `taskkill /T /F`. Elsewhere SIGTERM then SIGKILL.
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {(fn:() => void, ms:number) => void} addTimer
+ */
+function killTree(child, addTimer) {
+  if (process.platform === "win32" && child.pid) {
+    try {
+      const tk = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
+        shell: false,
+        windowsHide: true,
+      });
+      tk.on("error", () => {});
+    } catch {
+      // fall back to plain kill below
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }
+    return;
+  }
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // ignore
+  }
+  addTimer(() => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // ignore
+    }
+  }, 2000);
+}
+
 /**
  * Run a child process (shell:false, argv array) with a hard timeout, feeding
- * `input` to stdin. Never rejects — always resolves with a result descriptor.
+ * `input` to stdin. Never rejects — always resolves with a result descriptor,
+ * even if the child ignores kill signals (a grace timer force-resolves).
+ * Captured output is capped at MAX_OUTPUT_BYTES per stream; exceeding the cap
+ * kills the process tree and surfaces an error.
  * @param {{command:string, args?:string[], input?:string, timeoutMs?:number, cwd?:string}} opts
  * @returns {Promise<ProcessRunResult>}
  */
@@ -153,12 +201,27 @@ export function runProcess({
 }) {
   return new Promise((resolve) => {
     let settled = false;
+    /** @type {Set<NodeJS.Timeout>} */
+    const timers = new Set();
+    const addTimer = (fn, ms) => {
+      const t = setTimeout(fn, ms);
+      t.unref?.();
+      timers.add(t);
+      return t;
+    };
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      for (const t of timers) clearTimeout(t);
+      resolve(result);
+    };
+
     /** @type {import('node:child_process').ChildProcess} */
     let child;
     try {
       child = spawn(command, args, { shell: false, cwd, windowsHide: true });
     } catch (err) {
-      resolve({
+      finish({
         code: null,
         stdout: "",
         stderr: "",
@@ -171,47 +234,64 @@ export function runProcess({
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    /** @type {Error|null} */
+    let outputError = null;
 
-    const timer = setTimeout(() => {
+    addTimer(() => {
       timedOut = true;
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
-      }
-      setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // ignore
-        }
-      }, 2000).unref?.();
+      killTree(child, addTimer);
+      // Guarantee resolution even if 'close' never fires after the kill.
+      addTimer(
+        () => finish({ code: null, stdout, stderr, timedOut: true, spawnError: outputError }),
+        KILL_GRACE_MS
+      );
     }, timeoutMs);
-    timer.unref?.();
 
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
+    const capAppend = (current, chunk) => {
+      const next = current + chunk.toString("utf8");
+      if (next.length > MAX_OUTPUT_BYTES) {
+        if (!outputError) {
+          outputError = new Error(
+            `process output exceeded ${MAX_OUTPUT_BYTES} bytes; killed`
+          );
+          killTree(child, addTimer);
+          addTimer(
+            () => finish({ code: null, stdout, stderr, timedOut, spawnError: outputError }),
+            KILL_GRACE_MS
+          );
+        }
+        return next.slice(0, MAX_OUTPUT_BYTES);
+      }
+      return next;
     };
 
     child.on("error", (err) => {
       finish({ code: null, stdout, stderr, timedOut, spawnError: err });
     });
+    // Swallow stream errors (a dying child can EPIPE its pipes; an unhandled
+    // 'error' on any of these streams would crash the whole process).
+    child.stdin?.on("error", () => {});
+    child.stdout?.on("error", () => {});
+    child.stderr?.on("error", () => {});
+
     child.stdout?.on("data", (d) => {
-      stdout += d.toString("utf8");
+      stdout = capAppend(stdout, d);
     });
     child.stderr?.on("data", (d) => {
-      stderr += d.toString("utf8");
+      stderr = capAppend(stderr, d);
     });
     child.on("close", (code) => {
-      finish({ code, stdout, stderr, timedOut, spawnError: null });
+      finish({ code, stdout, stderr, timedOut, spawnError: outputError });
     });
 
     if (child.stdin) {
-      if (input != null) child.stdin.write(input, "utf8");
-      child.stdin.end();
+      try {
+        if (input != null) child.stdin.write(input, "utf8");
+        child.stdin.end();
+      } catch {
+        // stdin may already be closed (fast-exiting child); 'error' handler
+        // above covers async EPIPE, this covers the sync throw path.
+      }
     }
   });
 }
@@ -262,4 +342,58 @@ export async function fetchWithTimeout(url, init, timeoutMs = DEFAULT_TIMEOUT_MS
  */
 export function makeTempDir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+/**
+ * Best-effort recursive removal of a temp dir; never throws.
+ * @param {string|null|undefined} dir
+ */
+export function removeDirQuietly(dir) {
+  if (!dir) return;
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best effort only
+  }
+}
+
+/**
+ * Normalize an HTTP endpoint: strip trailing slashes so path concatenation
+ * (`${endpoint}/api/chat`) never produces `//`.
+ * @param {unknown} endpoint
+ * @returns {string}
+ */
+export function normalizeEndpoint(endpoint) {
+  return String(endpoint ?? "").replace(/\/+$/, "");
+}
+
+/**
+ * POST JSON to `url` and parse the response body as JSON via res.text() so
+ * that a non-JSON body produces a diagnosable error (first 200 chars
+ * included) instead of an opaque fetch .json() failure. Throws on HTTP
+ * error status or unparsable body — callers wrap in runWithRetry.
+ * @param {string} url
+ * @param {object} body
+ * @param {number} timeoutMs
+ * @returns {Promise<unknown>}
+ */
+export async function fetchJson(url, body, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    timeoutMs
+  );
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`response was not valid JSON: ${text.slice(0, 200)}`);
+  }
 }

@@ -72,6 +72,9 @@ export function validateConfig(raw) {
   }
 
   const seenIds = new Set();
+  let humanCount = 0;
+  /** @type {Participant[]} */
+  const normalized = [];
   for (const p of participants) {
     if (!p || typeof p !== "object") {
       throw new Error("each participant must be an object");
@@ -85,22 +88,71 @@ export function validateConfig(raw) {
     }
     seenIds.add(participant.id);
 
+    if (typeof participant.name !== "string" || participant.name === "") {
+      throw new Error(`participant "${participant.id}" must have a non-empty string name`);
+    }
+
     if (typeof participant.adapter !== "string" || !ADAPTER_NAMES.includes(participant.adapter)) {
       throw new Error(
         `participant "${participant.id}" has unknown adapter "${participant.adapter}" (known: ${ADAPTER_NAMES.join(", ")})`
       );
     }
+
+    // HTTP adapters require a non-empty, parseable endpoint URL.
+    if (participant.adapter === "ollama" || participant.adapter === "openai-compat") {
+      if (typeof participant.endpoint !== "string" || participant.endpoint.trim() === "") {
+        throw new Error(
+          `participant "${participant.id}" (adapter ${participant.adapter}) requires a non-empty endpoint URL`
+        );
+      }
+      try {
+        new URL(participant.endpoint);
+      } catch {
+        throw new Error(
+          `participant "${participant.id}" has an invalid endpoint URL: ${participant.endpoint}`
+        );
+      }
+    }
+
+    if (participant.adapter === "human") {
+      humanCount++;
+      if (humanCount > 1) {
+        throw new Error("config allows at most one human participant");
+      }
+    }
+
+    // enabled: default true; if present it must be a real boolean.
+    let enabled;
+    if (participant.enabled === undefined) {
+      enabled = true;
+    } else if (typeof participant.enabled === "boolean") {
+      enabled = participant.enabled;
+    } else {
+      throw new Error(
+        `participant "${participant.id}" enabled must be a boolean (got ${typeof participant.enabled})`
+      );
+    }
+
+    normalized.push(/** @type {Participant} */ ({ ...participant, enabled }));
   }
 
-  const port = typeof obj.port === "number" && Number.isFinite(obj.port) ? obj.port : DEFAULT_PORT;
-  const maxRounds =
-    typeof obj.maxRounds === "number" && Number.isFinite(obj.maxRounds)
-      ? obj.maxRounds
-      : DEFAULT_MAX_ROUNDS;
+  let port = DEFAULT_PORT;
+  if (obj.port !== undefined) {
+    const v = obj.port;
+    if (!Number.isInteger(v) || /** @type {number} */ (v) < 1 || /** @type {number} */ (v) > 65535) {
+      throw new Error(`config.port must be an integer in 1..65535 (got ${v})`);
+    }
+    port = /** @type {number} */ (v);
+  }
 
-  return {
-    port,
-    maxRounds,
-    participants: /** @type {Participant[]} */ (participants),
-  };
+  let maxRounds = DEFAULT_MAX_ROUNDS;
+  if (obj.maxRounds !== undefined) {
+    const v = obj.maxRounds;
+    if (!Number.isInteger(v) || /** @type {number} */ (v) < 1) {
+      throw new Error(`config.maxRounds must be an integer >= 1 (got ${v})`);
+    }
+    maxRounds = /** @type {number} */ (v);
+  }
+
+  return { port, maxRounds, participants: normalized };
 }
