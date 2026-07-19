@@ -22,7 +22,7 @@ import { boardSummary, buildTurnPrompt, buildSynthesisPrompt, TURN_SCHEMA } from
  * @typedef {object} TurnResult
  * @property {string} [utterance]
  * @property {Array<object>} [cardOps]
- * @property {string} [noteUpdate]
+ * @property {string|null} [noteUpdate] - null は「NOTE更新なし」（厳格スキーマのnullable流儀）
  * @property {boolean} [pass]
  * @property {string} [error]
  * @property {string} [summary] - シンセシスターンでのみ使用

@@ -158,10 +158,12 @@ export function loadTranscript(stateDir, debateId) {
 /**
  * cardOps を board.cards に機械的に適用する。
  * 不正な op（存在しない cardId・不正な lane・不明な op種別など）は適用せず warnings に積む。
+ * cardId/lane/title/body の null は「未指定」と同義として扱う
+ * （厳格JSON Schema対応のTURN_SCHEMAでは未使用フィールドが null で来るため）。
  * board は破壊的に変更される（呼び出し側は同じ参照を使い続けてよい）。
  *
  * @param {object} board
- * @param {Array<{op:string, cardId?:string, lane?:string, title?:string, body?:string}>} cardOps
+ * @param {Array<{op:string, cardId?:string|null, lane?:string|null, title?:string|null, body?:string|null}>} cardOps
  * @param {string} byId - 操作した participant id（createdBy/updatedBy に記録）
  * @returns {{applied: Array<object>, warnings: string[]}}
  */
@@ -176,7 +178,7 @@ export function applyCardOps(board, cardOps, byId) {
       continue;
     }
     const op = rawOp;
-    if (op.op === undefined) {
+    if (op.op == null) {
       warnings.push('cardOpにopフィールドがありません');
       continue;
     }
@@ -230,12 +232,13 @@ export function applyCardOps(board, cardOps, byId) {
         warnings.push(`edit: 存在しないcardId "${op.cardId}"`);
         continue;
       }
-      if (op.title === undefined && op.body === undefined) {
+      // null は「未指定」と同義（厳格スキーマの全required+nullable流儀に対応。TURN_SCHEMA参照）
+      if (op.title == null && op.body == null) {
         warnings.push(`edit: title/bodyのどちらも指定なし (cardId=${op.cardId})`);
         continue;
       }
       let edited = false;
-      if (op.title !== undefined) {
+      if (op.title != null) {
         if (typeof op.title === 'string') {
           card.title = op.title;
           edited = true;
@@ -243,7 +246,7 @@ export function applyCardOps(board, cardOps, byId) {
           warnings.push(`edit: titleがstringではありません (cardId=${op.cardId})`);
         }
       }
-      if (op.body !== undefined) {
+      if (op.body != null) {
         if (typeof op.body === 'string') {
           card.body = op.body;
           edited = true;

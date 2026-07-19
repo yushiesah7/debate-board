@@ -9,8 +9,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { createDebate, loadDebate, saveBoard, appendTranscript, loadTranscript } from '../src/state.mjs';
+import { createDebate, loadDebate, saveBoard, appendTranscript, loadTranscript, applyCardOps } from '../src/state.mjs';
 import { runDebate } from '../src/engine.mjs';
+import { TURN_SCHEMA } from '../src/prompt.mjs';
 
 const TOPIC = 'きのこ vs たけのこ';
 
@@ -421,4 +422,97 @@ test('loadTranscriptは壊れた行をskipしてwarningsに積む', async () => 
   const { entries, warnings } = loadTranscript(stateDir, board.meta.id);
   assert.equal(entries.length, 2);
   assert.equal(warnings.length, 1);
+});
+
+test('TURN_SCHEMAは厳格JSON Schema互換（全property required・nullable・items必須）', () => {
+  // トップレベル: 全propertyがrequired
+  assert.deepEqual(
+    [...TURN_SCHEMA.required].sort(),
+    ['cardOps', 'noteUpdate', 'pass', 'utterance']
+  );
+  assert.equal(TURN_SCHEMA.additionalProperties, false);
+  // cardOpsのitemsが定義されている（codex --output-schemaの400対策）
+  const item = TURN_SCHEMA.properties.cardOps.items;
+  assert.ok(item && item.type === 'object');
+  assert.deepEqual(
+    [...item.required].sort(),
+    ['body', 'cardId', 'lane', 'op', 'title']
+  );
+  assert.equal(item.additionalProperties, false);
+  // 省略可能フィールドはnullable
+  assert.deepEqual(item.properties.cardId.type, ['string', 'null']);
+  assert.deepEqual(item.properties.lane.type, ['string', 'null']);
+  assert.deepEqual(item.properties.title.type, ['string', 'null']);
+  assert.deepEqual(item.properties.body.type, ['string', 'null']);
+  assert.deepEqual(TURN_SCHEMA.properties.noteUpdate.type, ['string', 'null']);
+});
+
+test('applyCardOps: 厳格スキーマ形（null埋め）のcardOpsを未指定として扱う', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig());
+
+  // add: cardIdはnullで来る（正常）
+  let r = applyCardOps(
+    board,
+    [{ op: 'add', cardId: null, lane: 'discussing', title: '論点X', body: '本文X' }],
+    'a'
+  );
+  assert.equal(r.applied.length, 1);
+  assert.equal(r.warnings.length, 0);
+  const cardId = board.cards[0].id;
+
+  // move: title/bodyはnullで来る（正常）
+  r = applyCardOps(board, [{ op: 'move', cardId, lane: 'decided', title: null, body: null }], 'a');
+  assert.equal(r.applied.length, 1);
+  assert.equal(r.warnings.length, 0);
+  assert.equal(board.cards[0].lane, 'decided');
+
+  // edit: bodyだけ更新、title:nullは未指定扱い（警告なし）
+  r = applyCardOps(board, [{ op: 'edit', cardId, lane: null, title: null, body: '更新後' }], 'a');
+  assert.equal(r.applied.length, 1);
+  assert.equal(r.warnings.length, 0);
+  assert.equal(board.cards[0].title, '論点X'); // titleは維持
+  assert.equal(board.cards[0].body, '更新後');
+
+  // 不正: add で lane:null → warning
+  r = applyCardOps(board, [{ op: 'add', cardId: null, lane: null, title: 't', body: null }], 'a');
+  assert.equal(r.applied.length, 0);
+  assert.equal(r.warnings.length, 1);
+
+  // 不正: add で title:null → warning
+  r = applyCardOps(board, [{ op: 'add', cardId: null, lane: 'held', title: null, body: null }], 'a');
+  assert.equal(r.applied.length, 0);
+  assert.equal(r.warnings.length, 1);
+
+  // 不正: move で lane:null → warning
+  r = applyCardOps(board, [{ op: 'move', cardId, lane: null, title: null, body: null }], 'a');
+  assert.equal(r.applied.length, 0);
+  assert.equal(r.warnings.length, 1);
+
+  // 不正: edit で title/bodyとも null → 「どちらも指定なし」warning
+  r = applyCardOps(board, [{ op: 'edit', cardId, lane: null, title: null, body: null }], 'a');
+  assert.equal(r.applied.length, 0);
+  assert.equal(r.warnings.length, 1);
+});
+
+test('noteUpdate: null はNOTE更新なしとして扱われる', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({ maxRounds: 2 }));
+
+  const adapters = {
+    a: {
+      async speak(ctx) {
+        if (ctx.round === 1) {
+          return { utterance: 'R1', cardOps: [], noteUpdate: 'R1のメモ', pass: false };
+        }
+        return { utterance: 'R2', cardOps: [], noteUpdate: null, pass: false };
+      },
+    },
+    b: alwaysSpeakAdapter('B'),
+  };
+
+  await runDebate({ stateDir, board, adapters });
+
+  // R2の noteUpdate:null で上書きされず、R1のメモが残る
+  assert.equal(board.notes.a, 'R1のメモ');
 });

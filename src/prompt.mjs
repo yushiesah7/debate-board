@@ -52,43 +52,37 @@ function formatRecentTranscript(recentTranscript) {
 }
 
 /**
- * SPEC §5 の出力契約（AI応答スキーマ）。JSON Schema オブジェクト。
- * additionalProperties: false（全アダプタ共通で使い回す）。
+ * SPEC §5 の出力契約（AI応答スキーマ）。JSON Schema オブジェクト（全アダプタ共通）。
+ *
+ * 厳格モード互換（codex --output-schema 等の strict JSON Schema）:
+ * - 全propertyを required に入れ、省略可能なフィールドは nullable（type: ["string","null"]）で表現する流儀
+ * - このため cardOps 各要素の cardId/lane/title/body、および noteUpdate は null で来ることがある。
+ *   受け側（state.mjs の applyCardOps / engine.mjs）は「null＝未指定」として扱う
  */
 export const TURN_SCHEMA = {
   type: 'object',
-  additionalProperties: false,
-  required: ['utterance', 'cardOps', 'pass'],
   properties: {
-    utterance: {
-      type: 'string',
-      description: '発言（日本語、400字以内目安）',
-    },
+    utterance: { type: 'string' },
     cardOps: {
       type: 'array',
-      description: 'かんばんへの操作。不要なら空配列',
       items: {
         type: 'object',
-        additionalProperties: false,
-        required: ['op'],
         properties: {
           op: { type: 'string', enum: ['add', 'move', 'edit'] },
-          cardId: { type: 'string', description: 'move/edit時に必須' },
-          lane: { type: 'string', enum: ['decided', 'discussing', 'held'] },
-          title: { type: 'string', description: 'add/edit時' },
-          body: { type: 'string', description: 'add/edit時' },
+          cardId: { type: ['string', 'null'] },
+          lane: { type: ['string', 'null'] },
+          title: { type: ['string', 'null'] },
+          body: { type: ['string', 'null'] },
         },
+        required: ['op', 'cardId', 'lane', 'title', 'body'],
+        additionalProperties: false,
       },
     },
-    noteUpdate: {
-      type: 'string',
-      description: '自分のNOTE全文置換（省略可）',
-    },
-    pass: {
-      type: 'boolean',
-      description: 'このラウンドは発言をスキップするか',
-    },
+    noteUpdate: { type: ['string', 'null'] },
+    pass: { type: 'boolean' },
   },
+  required: ['utterance', 'cardOps', 'noteUpdate', 'pass'],
+  additionalProperties: false,
 };
 
 /**
@@ -126,6 +120,9 @@ export function buildTurnPrompt({ participant, topic, round, maxRounds, board, o
     '必要であればカード操作（cardOps）でかんばんを更新し、自分のNOTE（noteUpdate）を更新してください。',
     'これ以上議論を深める必要がないと判断したら pass を true にしてください。',
     '出力は必ず次のJSONスキーマに厳密に従うJSONのみとし、それ以外の文章を含めないでください。',
+    'cardOps の各操作で使わないフィールドには null を入れてください',
+    '（例: add では cardId を null に、move では title と body を null に）。',
+    'カード操作が不要なら cardOps は空配列 [] に、NOTEを更新しない場合は noteUpdate を null にしてください。',
     JSON.stringify(TURN_SCHEMA, null, 2),
   ].join('\n');
 }
