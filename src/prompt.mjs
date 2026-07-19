@@ -154,6 +154,7 @@ export function buildSynthesisPrompt({ topic, board, transcriptTail }) {
     '2. held（保留）の整理',
     '3. discussing（議論中）に残っている論点のリスト',
     '4. 全体の結論サマリ',
-    '出力は summary という1つの文字列にまとめ、他の説明文は付けないでください。',
+    '出力は次のJSONだけを返してください（サマリ全文を utterance に入れる。他の説明文は不要）:',
+    '{"utterance": "<結論サマリ全文>", "cardOps": [], "noteUpdate": null, "pass": false}',
   ].join('\n');
 }

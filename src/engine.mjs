@@ -153,7 +153,8 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
         humanTimeoutMs,
       };
       // buildTurnPrompt は完全なプロンプト文字列が欲しいアダプタ向けに用意しておく
-      ctx.prompt = buildTurnPrompt({
+      // （アダプタ契約のフィールド名は promptText。prompt は後方互換エイリアス）
+      ctx.promptText = buildTurnPrompt({
         participant,
         topic: ctx.topic,
         round,
@@ -162,6 +163,7 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
         ownNote: ctx.ownNote,
         recentTranscript: ctx.recentTranscript,
       });
+      ctx.prompt = ctx.promptText;
 
       const adapter = adapters?.[participant.id];
       let result;
@@ -253,8 +255,10 @@ async function runSynthesis({ stateDir, board, history, adapters, emit }) {
       topic: board.meta.topic,
       board,
       transcriptTail,
-      prompt: buildSynthesisPrompt({ topic: board.meta.topic, board, transcriptTail }),
+      promptText: buildSynthesisPrompt({ topic: board.meta.topic, board, transcriptTail }),
     };
+    ctx.prompt = ctx.promptText;
+    ctx.schemaJson = TURN_SCHEMA;
     try {
       const result = await adapters[synthesisParticipant.id].speak(ctx);
       if (result && typeof result === 'object') {
