@@ -344,6 +344,148 @@ test('マルチバイトUTF-8がチャンク境界で分断されても正しく
   assert.ok(!JSON.stringify(result.body.board.cards).includes('�'), '置換文字(U+FFFD)が混入していないこと');
 });
 
+test('POST /api/participant: model/effort/pcAccessを更新できる', async (t) => {
+  const { baseUrl } = await startTestServer(t);
+  const res = await postJson(`${baseUrl}/api/participant`, {
+    id: 'a',
+    model: 'opus',
+    effort: 'high',
+    pcAccess: 'full',
+  });
+  assert.equal(res.status, 200);
+  const a = res.body.participants.find((p) => p.id === 'a');
+  assert.equal(a.model, 'opus');
+  assert.equal(a.effort, 'high');
+  assert.equal(a.pcAccess, 'full');
+});
+
+test('POST /api/participant: null/空文字でフィールドが削除される（CLI既定への復帰）', async (t) => {
+  const { baseUrl } = await startTestServer(t);
+  await postJson(`${baseUrl}/api/participant`, { id: 'a', model: 'opus', effort: 'high' });
+  const res = await postJson(`${baseUrl}/api/participant`, { id: 'a', model: null, effort: '' });
+  assert.equal(res.status, 200);
+  const a = res.body.participants.find((p) => p.id === 'a');
+  assert.equal(a.model, null);
+  assert.equal(a.effort, null);
+});
+
+test('POST /api/participant: 不正idは400', async (t) => {
+  const { baseUrl } = await startTestServer(t);
+  const res = await postJson(`${baseUrl}/api/participant`, { id: 'nope', model: 'opus' });
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/participant: 不正pcAccessは400', async (t) => {
+  const { baseUrl } = await startTestServer(t);
+  const res = await postJson(`${baseUrl}/api/participant`, { id: 'a', pcAccess: 'sudo' });
+  assert.equal(res.status, 400);
+});
+
+test('POST /api/participant: human参加者は無視されて400にならない', async (t) => {
+  const { baseUrl } = await startTestServer(t);
+  const res = await postJson(`${baseUrl}/api/participant`, { id: 'you', model: 'opus', pcAccess: 'full' });
+  assert.equal(res.status, 200);
+  const you = res.body.participants.find((p) => p.id === 'you');
+  assert.equal(you.model, null);
+  assert.equal(you.pcAccess, null);
+});
+
+test('POST /api/participant: CLI系以外(ollama)のpcAccessは無視される（400にもならない）', async (t) => {
+  const { baseUrl } = await startTestServer(t, {
+    participants: [
+      { id: 'a', name: 'A', adapter: 'claude', enabled: true },
+      { id: 'local', name: 'ローカル', adapter: 'ollama', endpoint: 'http://127.0.0.1:11434', enabled: true },
+    ],
+  });
+  const res = await postJson(`${baseUrl}/api/participant`, { id: 'local', model: 'qwen3', pcAccess: 'full' });
+  assert.equal(res.status, 200);
+  const local = res.body.participants.find((p) => p.id === 'local');
+  assert.equal(local.model, 'qwen3'); // modelは適用される
+  assert.equal(local.pcAccess, null); // pcAccessは無視される（CLI系以外）
+});
+
+test('POST /api/participant: configPathへ永続化される（リポ本体のconfig.jsonは汚さない）', async (t) => {
+  const stateDir = makeStateDir();
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-configpath-test-'));
+  const configPath = path.join(configDir, 'config.json');
+  const config = { port: 0, maxRounds: 2, participants: defaultParticipants() };
+  const adapters = { a: fakeSpeaker('A'), b: fakeSpeaker('B') };
+  const server = createServer({ config, adapters, stateDir, configPath });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  t.after(() => new Promise((resolve) => server.close(() => resolve())));
+
+  const res = await postJson(`${baseUrl}/api/participant`, {
+    id: 'a',
+    model: 'opus',
+    effort: 'high',
+    pcAccess: 'full',
+  });
+  assert.equal(res.status, 200);
+
+  const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const a = saved.participants.find((p) => p.id === 'a');
+  assert.equal(a.model, 'opus');
+  assert.equal(a.effort, 'high');
+  assert.equal(a.pcAccess, 'full');
+  // 他の参加者は変更されていない
+  const b = saved.participants.find((p) => p.id === 'b');
+  assert.equal(b.model, undefined);
+});
+
+test('POST /api/participant: 実行中の議論のboard.participantsにも次ターンから反映される', async (t) => {
+  const stateDir = makeStateDir();
+  const config = { port: 0, maxRounds: 3, participants: defaultParticipants() };
+  const seenModels = [];
+  const adapters = {
+    a: {
+      async speak(ctx) {
+        seenModels.push(ctx.participant.model ?? null);
+        return {
+          utterance: `AのR${ctx.round}発言`,
+          cardOps: [],
+          noteUpdate: null,
+          pass: seenModels.length >= 2,
+          error: null,
+        };
+      },
+    },
+    b: fakeSpeaker('B'),
+  };
+  const server = createServer({ config, adapters, stateDir });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const sseReqs = [];
+  t.after(
+    () =>
+      new Promise((resolve) => {
+        for (const req of sseReqs) {
+          try {
+            req.destroy();
+          } catch {
+            /* already closed */
+          }
+        }
+        server.close(() => resolve());
+      })
+  );
+  const sse = connectSSE(`${baseUrl}/api/events`, sseReqs);
+
+  await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 3 });
+  // ラウンド1完了後、humanの番でawaitingHumanが立つ（a/bはすでにR1で発言済み）
+  await waitFor(() => sse.events.some((e) => e.type === 'await-human'));
+  assert.equal(seenModels[0], null); // R1時点ではまだ未設定
+
+  const patchRes = await postJson(`${baseUrl}/api/participant`, { id: 'a', model: 'opus' });
+  assert.equal(patchRes.status, 200);
+
+  await postJson(`${baseUrl}/api/skip`, {}); // ラウンド2へ進める
+  await waitFor(() => seenModels.length >= 2);
+  assert.equal(seenModels[1], 'opus'); // ラウンド2以降のspeak呼び出しに新しいmodelが渡る
+});
+
 test('サーバは静的にpublic/index.htmlを配信する', async (t) => {
   const { baseUrl } = await startTestServer(t);
   const res = await fetch(`${baseUrl}/`);

@@ -10,7 +10,7 @@
  *     meta: { id, topic, status, round, maxRounds, cardSeq, createdAt, updatedAt, endedBy? },
  *       - round は「完了したラウンド番号」（ラウンド完了時にのみ確定書き込みされる）
  *       - endedBy は終了時のみ: "maxRounds" | "allPass" | "ending" | "noParticipants"
- *     participants: [{ id, name, adapter, model?, endpoint?, persona?, enabled, session? }, ...],
+ *     participants: [{ id, name, adapter, model?, endpoint?, persona?, enabled, pcAccess, effort?, session? }, ...],
  *     cards: [{ id, lane, title, body, createdBy, updatedBy, updatedAt }, ...],
  *     notes: { [participantId]: string },
  *     summary: string | null
@@ -46,6 +46,11 @@ export function createDebate(stateDir, topic, config) {
     endpoint: p.endpoint ?? null,
     persona: p.persona ?? null,
     enabled: !!p.enabled,
+    // pcAccess/effort: CLIアダプタ(claude/codex/grok)がctx.participantから直接読む
+    // フィールド（SPEC §2）。ここで落とすと config/POST /api/participant で
+    // 設定しても実行中の議論には一切反映されなくなるので、必ず引き継ぐ。
+    pcAccess: p.pcAccess ?? 'read',
+    effort: p.effort ?? null,
     session: null,
   }));
 

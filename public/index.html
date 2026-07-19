@@ -173,6 +173,27 @@
   .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
   .chip.on .dot { background: var(--green); }
   .chip .adapter-tag { font-size: 10px; color: var(--text-dim); }
+  .chip .config-tag { font-size: 10px; color: var(--accent); }
+
+  .chip-wrap { display: inline-flex; align-items: center; gap: 2px; }
+  .chip-gear {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px; height: 22px;
+    padding: 0;
+    margin: 0;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .chip-gear:hover { border-color: var(--accent); color: var(--accent); }
+  .chip-gear:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   #main {
     display: flex;
@@ -446,6 +467,39 @@
   </div>
 </div>
 
+<!-- 参加者設定モーダル -->
+<div class="modal-overlay" id="participant-modal">
+  <div class="modal-box">
+    <h3>参加者設定</h3>
+    <div id="participant-modal-name" style="font-size:14px; font-weight:600;"></div>
+    <div id="participant-modal-adapter" style="font-size:11px; color:var(--text-dim); margin-top:2px;"></div>
+
+    <label for="participant-modal-model">model</label>
+    <input id="participant-modal-model" type="text" list="participant-model-options" placeholder="未指定=CLI既定を継承" maxlength="100">
+    <datalist id="participant-model-options"></datalist>
+
+    <label id="participant-modal-effort-label" for="participant-modal-effort">effort</label>
+    <input id="participant-modal-effort" type="text" list="participant-effort-options" placeholder="未指定=CLI既定を継承" maxlength="40">
+    <datalist id="participant-effort-options"></datalist>
+
+    <div id="participant-modal-pcaccess-row">
+      <label for="participant-modal-pcaccess">pcAccess</label>
+      <select id="participant-modal-pcaccess">
+        <option value="read">read</option>
+        <option value="full">full</option>
+      </select>
+      <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">read=見るだけ／full=読み書き実行可（自己責任）</div>
+    </div>
+
+    <div style="font-size:11px; color:var(--text-dim); margin-top:12px;">model/effortを空欄で保存すると、そのフィールドが削除されCLI既定に戻ります。</div>
+
+    <div class="modal-actions">
+      <button id="participant-modal-cancel">キャンセル</button>
+      <button id="participant-modal-save" class="primary">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
   "use strict";
@@ -474,10 +528,10 @@
         summary: null
       },
       participants: [
-        { id: "nagi", name: "凪", adapter: "claude", enabled: true },
-        { id: "aki", name: "アキ", adapter: "codex", enabled: true },
-        { id: "loki", name: "ロキ", adapter: "grok", enabled: true },
-        { id: "human", name: "あなた", adapter: "human", enabled: true }
+        { id: "nagi", name: "凪", adapter: "claude", enabled: true, model: "sonnet", effort: "medium", pcAccess: "read" },
+        { id: "aki", name: "アキ", adapter: "codex", enabled: true, model: null, effort: "high", pcAccess: "read" },
+        { id: "loki", name: "ロキ", adapter: "grok", enabled: true, model: null, effort: null, pcAccess: "read" },
+        { id: "human", name: "あなた", adapter: "human", enabled: true, model: null, effort: null, pcAccess: null }
       ],
       awaitingHuman: { participantId: "human" },
       transcript: [
@@ -504,6 +558,22 @@
   var noteSaveTimer = null;
   var dragJustEnded = false; // ドラッグ直後のclick抑制フラグ
   var toastTimer = null;
+
+  // 参加者設定モーダル用の候補（docs/SPEC.md §2）。CLI系のみeffort/pcAccessを表示する。
+  var CLI_ADAPTERS = ["claude", "codex", "grok"];
+  var MODEL_SUGGESTIONS = {
+    claude: ["sonnet", "opus", "haiku"],
+    codex: ["gpt-5.6-luna"],
+    grok: ["grok-4.5-build"],
+    ollama: [],
+    "openai-compat": []
+  };
+  var EFFORT_SUGGESTIONS = {
+    claude: ["low", "medium", "high", "xhigh"],
+    codex: ["minimal", "low", "medium", "high", "xhigh"],
+    grok: ["low", "medium", "high"]
+  };
+  var participantModalTargetId = null;
 
   function log() {
     // モック時の擬似POSTログ
@@ -624,6 +694,22 @@
       state.awaitingHuman = null;
     } else if (path === "/api/note") {
       if (myParticipantId) state.board.notes[myParticipantId] = body.text || "";
+    } else if (path === "/api/participant") {
+      applyMockParticipantPatch(body);
+    }
+  }
+
+  function applyMockParticipantPatch(body) {
+    var p = state.participants.find(function (x) { return x.id === body.id; });
+    if (!p || p.adapter === "human") return; // human参加者は無視（400にはしない、というのはサーバ側の話。mockでも同じ挙動に合わせる）
+    if ("model" in body) {
+      p.model = (body.model === null || body.model === "") ? null : body.model;
+    }
+    if ("effort" in body) {
+      p.effort = (body.effort === null || body.effort === "") ? null : body.effort;
+    }
+    if ("pcAccess" in body && CLI_ADAPTERS.indexOf(p.adapter) !== -1) {
+      p.pcAccess = body.pcAccess;
     }
   }
 
@@ -698,19 +784,60 @@
     }
   }
 
+  function abbrevEffort(e) {
+    switch (e) {
+      case "minimal": return "min";
+      case "low": return "low";
+      case "medium": return "med";
+      case "high": return "high";
+      case "xhigh": return "xh";
+      default: return e ? String(e).slice(0, 3) : "";
+    }
+  }
+
+  function configTagLabel(p) {
+    var bits = [];
+    if (p.model) bits.push(p.model);
+    if (p.effort) bits.push(abbrevEffort(p.effort));
+    return bits.join("·"); // "・"の代わりに中黒(middle dot)
+  }
+
   function renderParticipants() {
     var bar = document.getElementById("participants-bar");
     bar.innerHTML = "";
     (state.participants || []).forEach(function (p) {
+      var wrap = document.createElement("span");
+      wrap.className = "chip-wrap";
+
       var chip = document.createElement("button");
       chip.type = "button";
       chip.className = "chip " + (p.enabled ? "on" : "off");
       chip.setAttribute("aria-pressed", p.enabled ? "true" : "false");
-      chip.innerHTML = '<span class="dot"></span><span>' + escapeHtml(p.name) + '</span><span class="adapter-tag">' + escapeHtml(p.adapter) + '</span>';
+      var configLabel = configTagLabel(p);
+      chip.innerHTML =
+        '<span class="dot"></span><span></span><span class="adapter-tag"></span>' +
+        (configLabel ? '<span class="config-tag"></span>' : "");
+      chip.querySelectorAll("span")[1].textContent = p.name;
+      chip.querySelector(".adapter-tag").textContent = p.adapter;
+      if (configLabel) chip.querySelector(".config-tag").textContent = configLabel;
       chip.addEventListener("click", function () {
         apiPost("/api/toggle", { id: p.id, enabled: !p.enabled });
       });
-      bar.appendChild(chip);
+      wrap.appendChild(chip);
+
+      var gear = document.createElement("button");
+      gear.type = "button";
+      gear.className = "chip-gear";
+      gear.title = p.name + " の設定";
+      gear.setAttribute("aria-label", p.name + " の設定");
+      gear.textContent = "⚙";
+      gear.addEventListener("click", function (e) {
+        e.stopPropagation();
+        openParticipantModal(p);
+      });
+      wrap.appendChild(gear);
+
+      bar.appendChild(wrap);
     });
   }
 
@@ -957,6 +1084,64 @@
       }
     }
     closeCardModal();
+  });
+
+  // ------------------------------------------------------------------
+  // 参加者設定モーダル
+  // ------------------------------------------------------------------
+  function fillDatalist(id, values) {
+    var dl = document.getElementById(id);
+    dl.innerHTML = "";
+    (values || []).forEach(function (v) {
+      var opt = document.createElement("option");
+      opt.value = v;
+      dl.appendChild(opt);
+    });
+  }
+
+  function openParticipantModal(p) {
+    participantModalTargetId = p.id;
+    document.getElementById("participant-modal-name").textContent = p.name;
+    document.getElementById("participant-modal-adapter").textContent = "adapter: " + p.adapter;
+    document.getElementById("participant-modal-model").value = p.model || "";
+    document.getElementById("participant-modal-effort").value = p.effort || "";
+    document.getElementById("participant-modal-pcaccess").value = p.pcAccess || "read";
+
+    fillDatalist("participant-model-options", MODEL_SUGGESTIONS[p.adapter] || []);
+    fillDatalist("participant-effort-options", EFFORT_SUGGESTIONS[p.adapter] || []);
+
+    var isCli = CLI_ADAPTERS.indexOf(p.adapter) !== -1;
+    document.getElementById("participant-modal-effort").style.display = isCli ? "" : "none";
+    document.getElementById("participant-modal-effort-label").style.display = isCli ? "" : "none";
+    document.getElementById("participant-modal-pcaccess-row").style.display = isCli ? "" : "none";
+
+    document.getElementById("participant-modal").classList.add("show");
+  }
+
+  function closeParticipantModal() {
+    document.getElementById("participant-modal").classList.remove("show");
+  }
+
+  document.getElementById("participant-modal-cancel").addEventListener("click", closeParticipantModal);
+  document.getElementById("participant-modal").addEventListener("click", function (e) {
+    if (e.target.id === "participant-modal") closeParticipantModal();
+  });
+  document.getElementById("participant-modal-save").addEventListener("click", function () {
+    var p = (state.participants || []).find(function (x) { return x.id === participantModalTargetId; });
+    if (!p) { closeParticipantModal(); return; }
+
+    var modelVal = document.getElementById("participant-modal-model").value.trim();
+    var body = { id: p.id, model: modelVal === "" ? null : modelVal };
+    if (CLI_ADAPTERS.indexOf(p.adapter) !== -1) {
+      var effortVal = document.getElementById("participant-modal-effort").value.trim();
+      body.effort = effortVal === "" ? null : effortVal;
+      body.pcAccess = document.getElementById("participant-modal-pcaccess").value;
+    }
+
+    apiPost("/api/participant", body).then(function (r) {
+      if (r && r.ok) showToast("設定を保存しました: " + p.name);
+    });
+    closeParticipantModal();
   });
 
   // ------------------------------------------------------------------

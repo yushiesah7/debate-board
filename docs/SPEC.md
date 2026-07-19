@@ -122,12 +122,13 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 
 | メソッド/パス | ボディ / 応答 |
 |---|---|
-| GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled}], awaitingHuman:null\|{participantId}, transcript:[{round,speaker,text,ts}]}` |
+| GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`） |
 | SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"ended"}` |
 | POST `/api/start` | `{topic, maxRounds}`（ONが2人未満なら400） |
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |
 | POST `/api/end` | `{}` |
 | POST `/api/toggle` | `{id, enabled}` |
+| POST `/api/participant` | `{id, model?, effort?, pcAccess?}`（`model`/`effort`は非空文字列で設定、`null`か空文字でそのフィールドを削除=CLI既定継承。`pcAccess`は`"read"`\|`"full"`のみ、CLI系（claude/codex/grok）以外は無視。human参加者は全フィールド無視（400にはしない）。不正id・不正pcAccessは400。config.jsonへ永続化し、実行中なら該当参加者の次ターンから反映） |
 | POST `/api/card` | `{op:"add"\|"move"\|"edit", cardId?, lane?, title?, body?}`（編集でレーン変更する場合はedit→moveの2リクエスト可） |
 | POST `/api/say` | `{text}`（awaitingHuman時のみ有効） |
 | POST `/api/skip` | `{}`（同上） |

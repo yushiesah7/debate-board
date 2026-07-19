@@ -28,9 +28,13 @@ import { makeHuman, HUMAN_TIMEOUT_MS } from './adapters/human.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_INDEX = path.join(__dirname, '..', 'public', 'index.html');
+const DEFAULT_CONFIG_PATH = path.join(__dirname, '..', 'config.json');
 
 /** POSTボディの上限（暴走・DoS対策のガード。ローカル専用アプリなので大きめでよい）。 */
 const MAX_BODY_BYTES = 1024 * 1024;
+
+/** POST /api/participant で model/effort/pcAccess を変更できるアダプタ種別（CLI系のみ）。 */
+const CLI_ADAPTER_NAMES = ['claude', 'codex', 'grok'];
 
 /** @param {number} ms */
 function sleep(ms) {
@@ -112,9 +116,15 @@ function sendError(res, statusCode, message) {
  * @param {import('./config.mjs').Config} args.config
  * @param {Object<string, {speak: (ctx: object) => Promise<object>}>} [args.adapters] - テスト用: participantId -> フェイクアダプタ。指定されたidだけ上書きし、それ以外は通常解決する
  * @param {string} [args.stateDir] - state ルートディレクトリ（既定 "state"）
+ * @param {string} [args.configPath] - POST /api/participant の永続化先（既定はリポルートの config.json）
  * @returns {import('node:http').Server}
  */
-export function createServer({ config, adapters: injectedAdapters, stateDir = 'state' } = {}) {
+export function createServer({
+  config,
+  adapters: injectedAdapters,
+  stateDir = 'state',
+  configPath = DEFAULT_CONFIG_PATH,
+} = {}) {
   if (!config) throw new Error('createServer requires a config');
 
   /** @type {object|null} 進行中（または直近に完了した）議論のboard */
@@ -196,7 +206,17 @@ export function createServer({ config, adapters: injectedAdapters, stateDir = 's
 
   function currentParticipantsView() {
     const list = currentBoard ? currentBoard.participants : participants;
-    return list.map((p) => ({ id: p.id, name: p.name, adapter: p.adapter, enabled: p.enabled }));
+    return list.map((p) => ({
+      id: p.id,
+      name: p.name,
+      adapter: p.adapter,
+      enabled: p.enabled,
+      // model/effort/pcAccess: 参加者設定UI（POST /api/participant）向けの追加フィールド。
+      // 既存クライアントは未知フィールドを無視するだけなので後方互換（SPEC §8 追記対応）。
+      model: p.model ?? null,
+      effort: p.effort ?? null,
+      pcAccess: p.pcAccess ?? null,
+    }));
   }
 
   /** engineのメモリ履歴の代わりに transcript.jsonl（毎ターン同期保存済み）から読み直す */
@@ -331,6 +351,7 @@ export function createServer({ config, adapters: injectedAdapters, stateDir = 's
       '/api/pause': handlePause,
       '/api/end': handleEnd,
       '/api/toggle': handleToggle,
+      '/api/participant': handleParticipant,
       '/api/card': handleCard,
       '/api/say': handleSay,
       '/api/skip': handleSkip,
@@ -451,6 +472,129 @@ export function createServer({ config, adapters: injectedAdapters, stateDir = 's
         saveBoard(stateDir, currentBoard);
       }
     }
+    broadcast({ type: 'update' });
+    return sendJson(res, 200, buildStateResponse());
+  }
+
+  /**
+   * body.value を「フィールド更新」の指示に正規化する。
+   * - 非空文字列 → そのフィールドを設定
+   * - null または "" → そのフィールドを削除（CLI既定への復帰）
+   * - それ以外の型 → 不正
+   * @param {unknown} value
+   * @returns {{action:'set', value:string}|{action:'delete'}|{action:'invalid'}}
+   */
+  function normalizeFieldUpdate(value) {
+    if (value === null || value === '') return { action: 'delete' };
+    if (typeof value === 'string') return { action: 'set', value };
+    return { action: 'invalid' };
+  }
+
+  /**
+   * patch（{model?, effort?, pcAccess?}; 値が undefined のキーは「削除」を意味する）を
+   * 参加者オブジェクトへ破壊的に適用する。
+   * @param {object} target
+   * @param {Record<string, string|undefined>} patch
+   */
+  function applyParticipantPatch(target, patch) {
+    for (const key of ['model', 'effort', 'pcAccess']) {
+      if (!(key in patch)) continue;
+      if (patch[key] === undefined) {
+        delete target[key];
+      } else {
+        target[key] = patch[key];
+      }
+    }
+  }
+
+  /**
+   * configPath へ「読み→該当参加者だけpatch→書き戻し」する。saveBoard同様、
+   * tmpファイル→renameSync で原子的に書き込む。
+   * ファイルが存在しない・壊れている場合は起動時に読み込んだ config 全体から新規作成する。
+   * @param {string} id
+   * @param {Record<string, string|undefined>} patch
+   */
+  function persistParticipantConfig(id, patch) {
+    /** @type {any} */
+    let fileConfig;
+    try {
+      fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    } catch {
+      fileConfig = null;
+    }
+    if (!fileConfig || typeof fileConfig !== 'object' || !Array.isArray(fileConfig.participants)) {
+      fileConfig = {
+        port: config.port,
+        maxRounds: config.maxRounds,
+        participants: config.participants.map((p) => ({ ...p })),
+      };
+    }
+    const idx = fileConfig.participants.findIndex((p) => p && p.id === id);
+    if (idx === -1) return; // configPathにその参加者がいない（想定外だが例外にはしない）
+    const target = { ...fileConfig.participants[idx] };
+    applyParticipantPatch(target, patch);
+    fileConfig.participants[idx] = target;
+
+    const dir = path.dirname(configPath);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${configPath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(fileConfig, null, 2), 'utf8');
+    fs.renameSync(tmp, configPath);
+  }
+
+  function handleParticipant(body, res) {
+    if (typeof body.id !== 'string' || body.id === '') {
+      return sendError(res, 400, 'id (string) is required');
+    }
+    const p = participants.find((x) => x.id === body.id);
+    if (!p) return sendError(res, 400, `unknown participant id "${body.id}"`);
+
+    // human参加者にはmodel/effort/pcAccessいずれも無意味なので、無視して現状のstateを返す（400にはしない）
+    if (p.adapter === 'human') {
+      return sendJson(res, 200, buildStateResponse());
+    }
+
+    /** @type {Record<string, string|undefined>} */
+    const patch = {};
+
+    if ('model' in body) {
+      const r = normalizeFieldUpdate(body.model);
+      if (r.action === 'invalid') {
+        return sendError(res, 400, 'model must be a non-empty string, or null/"" to clear it');
+      }
+      patch.model = r.action === 'delete' ? undefined : r.value;
+    }
+
+    if ('effort' in body) {
+      const r = normalizeFieldUpdate(body.effort);
+      if (r.action === 'invalid') {
+        return sendError(res, 400, 'effort must be a non-empty string, or null/"" to clear it');
+      }
+      patch.effort = r.action === 'delete' ? undefined : r.value;
+    }
+
+    if ('pcAccess' in body) {
+      if (CLI_ADAPTER_NAMES.includes(p.adapter)) {
+        if (body.pcAccess !== 'read' && body.pcAccess !== 'full') {
+          return sendError(res, 400, 'pcAccess must be "read" or "full"');
+        }
+        patch.pcAccess = body.pcAccess;
+      }
+      // CLI系アダプタ以外（ollama/openai-compat）に指定された場合は無視する
+    }
+
+    applyParticipantPatch(p, patch);
+    if (currentBoard) {
+      const bp = currentBoard.participants.find((x) => x.id === body.id);
+      if (bp) {
+        // board.participants側も同じ内容にmutateする（ctx.participantが同一参照な
+        // ので、次にこの参加者のspeakが呼ばれるターンから自然に反映される。SPEC §2）
+        applyParticipantPatch(bp, patch);
+        saveBoard(stateDir, currentBoard);
+      }
+    }
+    persistParticipantConfig(body.id, patch);
+
     broadcast({ type: 'update' });
     return sendJson(res, 200, buildStateResponse());
   }
