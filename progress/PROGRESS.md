@@ -1,5 +1,19 @@
 # debate-board PROGRESS
 
+## 2026-07-20 M1/M2完成 — 実3AI議論の完走（記録者: 凪）
+
+- 何を変えたか:
+  - Wave1（PR#1 engine / #2 GUI / #3 adapters）とWave2（PR#4 server+CLI+summary）を全レビュー対応の上マージ。最終テスト106件全緑
+  - レビュー体制の実績: ロキ×3回（計47件指摘、うちCritical3）、アキ×2回（実プロセス再現テスト付きでP1×5）、CodeRabbit（有効1件=a11y）。「両者一致=本命」則が2回的中
+  - 統合グルー修正2件（ctx.promptText契約統一・シンセシス出力をTurnResult化）
+  - **M1達成**: `node src/cli.mjs "お題" 1` で凪(claude)×アキ(codex)×ロキ(grok)の実議論が完走。カード追加→decided移動→結論サマリ生成まで確認（お題例: バーチャル背景vs実写→「用途で使い分け」で合意形成）
+  - **M2達成（API検証）**: server起動→GUI配信(200)→/api/state→404処理を確認。GUI操作系はモック＋server統合テスト10件でカバー
+  - 実CLI知見: codex execはMCP無効化(`-c mcp_servers={}`)推奨・turn.failedでもexit 0・厳格スキーマ必須（配列にitems）。grokの`-p`は読み→答えは安定、長い実装は途切れる（実装はSonnet向き）
+  - 掃除: worktree4本とfeatureブランチ（ローカル/リモート）削除
+- 意図的に触らなかったもの: M3（resume活用・履歴閲覧・エクスポート）、ollama/oaiの実機スモーク（ローカルLLM未起動のため。ユニットはモックで検証済み）
+- 完了・未完了: M1/M2完了。ブラウザでの実操作確認はyushiさんの初回起動時に
+- 次に確認すべきこと: `cp config.example.json config.json`（済）→ `node src/server.mjs` → http://127.0.0.1:8787 でGUI議論を1回遊んでみる。良ければM3へ
+
 ## 2026-07-20 仕様v1.1＋GitHub公開（記録者: 凪）
 
 - 何を変えたか:
