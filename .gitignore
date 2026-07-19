@@ -1,5 +1,6 @@
 state/*
 !state/.gitkeep
+config.json
 node_modules/
 *.log
 .tmp/

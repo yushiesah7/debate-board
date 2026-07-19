@@ -30,7 +30,10 @@
 | `src/adapters/claude.mjs` | `claude -p <prompt> --output-format json --model <m> --system-prompt <persona>` | child_process |
 | `src/adapters/codex.mjs` | `codex exec --json --output-schema <schema.json> --skip-git-repo-check -C <dir>` | child_process |
 | `src/adapters/grok.mjs` | `grok -p <prompt> --json-schema <inline> --system-prompt-override <persona> --cwd <dir> --no-memory --disable-web-search --permission-mode dontAsk` | child_process |
+| `src/adapters/ollama.mjs` | `POST <endpoint>/api/chat`（format: json指定） | 組み込みfetch |
+| `src/adapters/oai.mjs` | `POST <endpoint>/v1/chat/completions`（response_format json）— LM Studio / llama.cpp server / vLLM | 組み込みfetch |
 | `src/adapters/human.mjs` | Promise保留→ /api/say か skip で解決。タイムアウト付き | なし |
+| `src/config.mjs` | config.json 読み込み・検証・既定値補完（config.example.json フォールバック） | node:fs |
 | `public/index.html` | GUI一式（HTML+CSS+JS 1ファイル、ビルドなし） | なし |
 
 ## アダプタ共通I/F
@@ -61,6 +64,7 @@ async function speak(ctx) {}
 3. **stateはファイル** — 再起動復帰・議事録がそのまま成果物・デバッグが目視でできる。DBは過剰
 4. **ボード要約を毎ターン注入（resume非依存）** — 参加者の途中ON/OFFでも文脈が壊れない。resumeはM3の最適化
 5. **ポート8787** — UnityMCP(8080)等との衝突回避
+6. **プラガブル参加者** — CLI勢もローカルLLMも同じTurnResultに正規化。HTTP系はNode組み込みfetch（依存ゼロ維持）。参加者定義はconfig.jsonでユーザーが自由に組める
 
 ## テスト方針
 

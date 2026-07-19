@@ -8,8 +8,8 @@
 | # | タスク | 成果物 | 受け入れ条件 |
 |---|---|---|---|
 | T1 | state + engine 純ロジック | `src/state.mjs`, `src/engine.mjs`, `src/prompt.mjs`, `test/engine.test.mjs` | `node --test` 緑。フェイクアダプタで4ラウンド完走・cardOps適用・全AIpass終了・不正cardOps無視を検証 |
-| T2 | アダプタ3種 + human | `src/adapters/*.mjs`, `test/smoke-adapters.mjs` | スモークで3CLIとも正規化TurnResultが返る（スキーマ準拠・タイムアウト・リトライ動作含む） |
-| T3 | GUI | `public/index.html`（モックstate同梱） | モックJSONでかんばん表示・DnD・トグル・transcript描画が動く（サーバ不要のスタンドアロン確認） |
+| T2 | アダプタ（claude/codex/grok/ollama/oai + human）+ config読込 | `src/adapters/*.mjs`, `src/config.mjs`, `test/smoke-adapters.mjs` | スモークで3CLIが正規化TurnResultを返す（スキーマ準拠・タイムアウト・リトライ含む）。ollama/oaiはモックHTTPサーバで検証 |
+| T3 | GUI | `public/index.html`（モックstate同梱） | モックJSONでかんばん表示・DnD・動的トグル（参加者数可変）・transcript描画が動く（サーバ不要のスタンドアロン確認） |
 
 ## Wave 2（Wave 1マージ後）
 
