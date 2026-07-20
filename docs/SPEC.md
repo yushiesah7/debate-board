@@ -138,7 +138,7 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 |---|---|
 | GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy,rules:{default,common,byId}},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, speaking:null\|{participantId,round,phase:"turn"\|"synthesis",since}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`。`speaking`は現在speak実行中の参加者=「考え中」表示用） |
 | GET `/api/options` | 応答 `{adapters:{<adapter名>:{models:string[], efforts:string[]}}}`。参加者設定UIの候補。サーバが実環境から自動発見（codex=`~/.codex/models_cache.json`、grok=`grok models`、ollama=`GET /api/tags`、openai-compat=`GET /v1/models`、claude=静的）し、結果を10分メモリキャッシュ。失敗したアダプタは静的フォールバックへ。**常に200** |
-| SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"turn-start","participantId","round"}`（speak開始=考え中）／`{"type":"speaking-progress","participantId","text"}`（話者の出力断片。サーバ側100msスロットル・揮発=stateには載せない）／`{"type":"synthesis-start","participantId"}`（結論まとめ中）／`{"type":"ended"}` |
+| SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"turn-start","participantId","round"}`（speak開始=考え中）／`{"type":"speaking-progress","participantId","text"}`（話者の出力断片。サーバ側100msスロットル・揮発=stateには載せない）／`{"type":"synthesis-start","participantId"}`（結論まとめ中）／`{"type":"interject-start","participantId"}`（割り込み応答中）／`{"type":"auto-export","files":[...]}`（終了時自動保存の完了）／`{"type":"ended"}` |
 | POST `/api/start` | `{topic, maxRounds, rules?, inherit?}`（ONが2人未満なら400。`rules`は開始モーダルの追加ルール文字列・任意・最大4000字（超過400）・**commonへ追記結合**。`inherit`は`{cards?,notes?,rules?,summaryCard?}`のbool群＝**前回のended boardからの引き継ぎ**: cards=全カードを新ID採番でコピー、notes=コピー、rules=前回のcommon/byIdをステージングより優先、summaryCard=前回summaryを`📋 前回の結論（<前回お題>）`カードとしてdecidedへ（createdBy="inherit"）。前回boardが無ければ無視） |
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |
 | POST `/api/end` | `{}` |
@@ -152,8 +152,10 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 | POST `/api/say` | `{text}`（awaitingHuman時のみ有効） |
 | POST `/api/skip` | `{}`（同上） |
 | POST `/api/note` | `{text}`（human参加者自身のNOTE更新） |
+| POST `/api/interject` | `{participantId, text}` — オーナーから特定AIへの**割り込み依頼**（text非空・最大4000字。human宛・不明pid・議論なしは400。AI発言中は**409**＝humanの入力待ち中は可）。実行中は一時pausedで通常ターンを止めて対象アダプタを1回呼び、transcriptへ `interject:"request"/"reply"` の2エントリ追記・cardOps/noteUpdate適用後にrunningへ復帰。**endedはendedのまま応答**（終了後も質問できる）。実行中は speaking が `phase:"interject"` になりライブ表示も流れる |
 
 - POST成功応答は最新の `/api/state` と同形を返す（クライアントは即時反映し、SSEは補助通知とする）
+- **自動エクスポート**: 議論終了（ended）のたびに `config.autoExportDir`（既定 `exports/`・git管理外・相対パスはリポルート基準）へ `<YYYYMMDD-HHmmss>_<お題スラッグ最大20字>-rules.json` / 同prefix `-notes.json`（GUIの手動エクスポートと同形式）を自動保存。書き込み失敗は議論を壊さずconsole.errorのみ。成功時はSSE `{"type":"auto-export","files":[...]}`。CLI実行でも同様に保存される
 
 ## 9. 非機能・セキュリティ・プライバシー
 

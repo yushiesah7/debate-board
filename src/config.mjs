@@ -30,6 +30,9 @@
  * @typedef {object} Config
  * @property {number} port
  * @property {number} maxRounds
+ * @property {string} autoExportDir
+ *   議論終了時にrules/notesのJSONを自動保存するディレクトリ（既定 "exports"）。
+ *   相対パスは利用側（server/cli）がリポルート基準に解決する。git管理外。
  * @property {Participant[]} participants
  */
 
@@ -42,6 +45,7 @@ export const DEFAULT_PORT = 8787;
 export const DEFAULT_MAX_ROUNDS = 4;
 export const PC_ACCESS_VALUES = ["read", "full"];
 export const DEFAULT_PC_ACCESS = "read";
+export const DEFAULT_AUTO_EXPORT_DIR = "exports";
 
 /**
  * Load and validate config from `<rootDir>/config.json`, falling back to
@@ -197,5 +201,16 @@ export function validateConfig(raw) {
     maxRounds = /** @type {number} */ (v);
   }
 
-  return { port, maxRounds, participants: normalized };
+  // autoExportDir: 既定 "exports"。指定時は非空文字列であること。
+  let autoExportDir = DEFAULT_AUTO_EXPORT_DIR;
+  if (obj.autoExportDir !== undefined) {
+    if (typeof obj.autoExportDir !== "string" || obj.autoExportDir.trim() === "") {
+      throw new Error(
+        `config.autoExportDir must be a non-empty string when specified (got ${JSON.stringify(obj.autoExportDir)})`
+      );
+    }
+    autoExportDir = obj.autoExportDir;
+  }
+
+  return { port, maxRounds, autoExportDir, participants: normalized };
 }

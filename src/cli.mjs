@@ -20,7 +20,7 @@ import { loadConfig } from './config.mjs';
 import { createDebate } from './state.mjs';
 import { runDebate } from './engine.mjs';
 import { resolveAdapter } from './adapters/index.mjs';
-import { readDefaultRules } from './server.mjs';
+import { readDefaultRules, exportDebateArtifacts } from './server.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -140,6 +140,18 @@ export async function main(argv) {
   console.log('');
   console.log('--- 結論サマリ ---');
   console.log(board.summary ?? '(サマリなし)');
+
+  // 議論終了時の自動エクスポート（サーバと同じrules/notesのJSON2ファイル）
+  try {
+    const dir = path.isAbsolute(config.autoExportDir)
+      ? config.autoExportDir
+      : path.join(rootDir, config.autoExportDir);
+    const files = exportDebateArtifacts(dir, board);
+    console.log('');
+    console.log(`自動エクスポート: ${dir} に ${files.join(' / ')} を保存しました`);
+  } catch (err) {
+    console.error('自動エクスポートに失敗しました:', err?.message ?? err);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

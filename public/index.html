@@ -491,6 +491,11 @@
       <button class="tab-btn active" data-tab="transcript">発言ログ</button>
     </div>
     <div id="tab-content"></div>
+    <div id="interject-bar" style="display:flex; gap:6px; padding:8px 10px; border-top:1px solid var(--border); align-items:center;">
+      <select id="interject-target" style="max-width:110px;" title="割り込み依頼の宛先（AI参加者のみ）"></select>
+      <input id="interject-input" type="text" maxlength="4000" placeholder="この参加者への割り込み依頼..." style="flex:1;">
+      <button id="interject-send" title="割り込み依頼を送信">📨</button>
+    </div>
   </div>
 </div>
 
@@ -786,6 +791,29 @@
     }
   }
 
+  // 割り込みバー: 宛先セレクト（AI参加者のみ）＋送信可否を状態に同期
+  function renderInterjectBar() {
+    var select = document.getElementById("interject-target");
+    var prev = select.value;
+    select.innerHTML = "";
+    (state.participants || []).forEach(function (p) {
+      if (p.adapter === "human") return;
+      var opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.name;
+      select.appendChild(opt);
+    });
+    if (prev && Array.prototype.some.call(select.options, function (o) { return o.value === prev; })) {
+      select.value = prev;
+    }
+    // AI発言中は送信不可（サーバも409を返す）。議論が一度も無いidleも不可
+    var status = state.board.meta && state.board.meta.status;
+    var busy = !!getSpeaking();
+    var disabled = busy || !status || status === "idle" || select.options.length === 0;
+    document.getElementById("interject-send").disabled = disabled;
+    document.getElementById("interject-send").title = busy ? "発言が終わってから送ってください" : "割り込み依頼を送信";
+  }
+
   function makeCopyBtn(getText, title) {
     var btn = document.createElement("button");
     btn.className = "copy-btn";
@@ -937,6 +965,24 @@
           else mr.byId[pid] = text;
         });
       }
+    } else if (path === "/api/interject") {
+      // モック: 依頼＋ダミー応答をローカル追加
+      var target = state.participants.find(function (x) { return x.id === body.participantId; });
+      state.transcript.push({
+        participantId: "owner",
+        name: "オーナー",
+        round: state.board.meta.round,
+        text: body.text || "",
+        interject: "request",
+        targetId: body.participantId
+      });
+      state.transcript.push({
+        participantId: body.participantId,
+        name: target ? target.name : body.participantId,
+        round: state.board.meta.round,
+        text: "（モック応答）" + (body.text || "") + " について了解しました。",
+        interject: "reply"
+      });
     } else if (path === "/api/import-notes") {
       if (body.notes && typeof body.notes === "object") {
         Object.keys(body.notes).forEach(function (pid) {
@@ -1042,11 +1088,14 @@
     var speakingEl = document.getElementById("speaking-display");
     var sp = getSpeaking();
     if (sp) {
-      speakingEl.textContent = (sp.phase === "synthesis" ? "まとめ中: " : "発言中: ") + participantName(sp.participantId);
+      var spLabel = sp.phase === "synthesis" ? "まとめ中: " : (sp.phase === "interject" ? "応答中: " : "発言中: ");
+      speakingEl.textContent = spLabel + participantName(sp.participantId);
       speakingEl.style.display = "";
     } else {
       speakingEl.style.display = "none";
     }
+
+    renderInterjectBar();
     // idleロック中は「+カード追加」を無効化見た目に
     var locked = cardsLocked();
     document.querySelectorAll(".add-card-btn").forEach(function (btn) {
@@ -1232,7 +1281,14 @@
         el.innerHTML =
           '<div class="transcript-head"><span></span><span class="transcript-round"></span></div>' +
           '<div class="transcript-body"></div>';
-        el.querySelector(".transcript-head span").textContent = entry.name || entry.speaker || entry.participantId || "?";
+        // 割り込み依頼のバッジ表示: request=「👤→<宛先名>」/ reply=「↩ <名前>」
+        var headName = entry.name || entry.speaker || entry.participantId || "?";
+        if (entry.interject === "request") {
+          headName = "👤→" + participantName(entry.targetId || "");
+        } else if (entry.interject === "reply") {
+          headName = "↩ " + headName;
+        }
+        el.querySelector(".transcript-head span").textContent = headName;
         el.querySelector(".transcript-round").textContent = "R" + entry.round;
         var bodyText = entry.text != null ? entry.text : (entry.utterance || "");
         el.querySelector(".transcript-body").textContent = bodyText;
@@ -1248,6 +1304,8 @@
         var label = document.createElement("span");
         if (sp.phase === "synthesis") {
           label.textContent = "📋 " + participantName(sp.participantId) + " が結論をまとめ中";
+        } else if (sp.phase === "interject") {
+          label.textContent = "📨 " + participantName(sp.participantId) + " が割り込み依頼に応答中";
         } else {
           label.textContent = "🤔 " + participantName(sp.participantId) + " が考え中";
         }
@@ -1888,6 +1946,25 @@
   });
 
   // ------------------------------------------------------------------
+  // 割り込み依頼（interject）
+  // ------------------------------------------------------------------
+  document.getElementById("interject-send").addEventListener("click", function () {
+    var pid = document.getElementById("interject-target").value;
+    var input = document.getElementById("interject-input");
+    var text = input.value.trim();
+    if (!pid || !text) return;
+    apiPost("/api/interject", { participantId: pid, text: text }).then(function (r) {
+      if (r && r.ok) {
+        input.value = "";
+        showToast("割り込み依頼を送信しました: " + participantName(pid));
+      }
+    });
+  });
+  document.getElementById("interject-input").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") document.getElementById("interject-send").click();
+  });
+
+  // ------------------------------------------------------------------
   // SSE
   // ------------------------------------------------------------------
   function connectEvents() {
@@ -1932,6 +2009,14 @@
             speakingProgressText = "";
             render();
           }
+        } else if (msg.type === "interject-start") {
+          if (state) {
+            state.speaking = { participantId: msg.participantId, round: null, phase: "interject" };
+            speakingProgressText = "";
+            render();
+          }
+        } else if (msg.type === "auto-export") {
+          showToast("exports/へ自動保存しました");
         } else if (msg.type === "speaking-progress") {
           // 現在の話者の断片だけ表示（古い話者の遅延断片は捨てる）
           if (state && state.speaking && state.speaking.participantId === msg.participantId &&

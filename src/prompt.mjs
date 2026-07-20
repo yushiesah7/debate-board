@@ -203,3 +203,49 @@ export function buildSynthesisPrompt({ topic, board, transcriptTail, rules }) {
     '{"utterance": "<結論サマリ全文>", "cardOps": [], "noteUpdate": null, "pass": false}',
   ].join('\n');
 }
+
+/**
+ * 割り込み依頼（interject）プロンプトを組み立てる。
+ * オーナー（人間）が特定の参加AIへ個別に依頼を投げるときの1回きりの呼び出し用。
+ * 通常ターンと同じ文脈（ルール・かんばん要約・自分のNOTE・直近の発言）に加え、
+ * 依頼文を明示し、出力契約は通常ターンと同じ TURN_SCHEMA。
+ *
+ * @param {object} args
+ * @param {{id:string,name:string,persona?:string}} args.participant
+ * @param {string} args.topic
+ * @param {object} args.board
+ * @param {string} [args.ownNote]
+ * @param {Array<object>} [args.recentTranscript]
+ * @param {string} [args.rules] - composeRulesFor済み（本人の個別ルール込み）の合成文字列
+ * @param {string} args.requestText - オーナーからの依頼文
+ * @returns {string}
+ */
+export function buildInterjectPrompt({ participant, topic, board, ownNote, recentTranscript, rules, requestText }) {
+  const persona = participant?.persona ? `\nあなたのペルソナ: ${participant.persona}` : '';
+  return [
+    `あなたは議論の参加者「${participant?.name ?? participant?.id}」です。${persona}`,
+    '',
+    `お題: ${topic}`,
+    '',
+    ...rulesSection(rules),
+    '--- 現在のかんばん（3レーン要約） ---',
+    boardSummary(board),
+    '',
+    '--- あなた自身のNOTE ---',
+    ownNote && ownNote.length > 0 ? ownNote : '(まだNOTEはありません)',
+    '',
+    '--- 直近の発言 ---',
+    formatRecentTranscript(recentTranscript),
+    '',
+    '--- オーナー（人間）からあなた個人への割り込み依頼 ---',
+    requestText,
+    '',
+    '--- 指示 ---',
+    '上記の割り込み依頼に、これまでの議論とかんばんを踏まえて日本語で応答してください。',
+    '必要であればカード操作（cardOps）でかんばんを更新し、自分のNOTE（noteUpdate）を更新してください。',
+    '出力は必ず次のJSONスキーマに厳密に従うJSONのみとし、それ以外の文章を含めないでください。',
+    'cardOps の各操作で使わないフィールドには null を入れてください。',
+    'カード操作が不要なら cardOps は空配列 [] に、NOTEを更新しない場合は noteUpdate を null にしてください。',
+    JSON.stringify(TURN_SCHEMA, null, 2),
+  ].join('\n');
+}

@@ -1122,6 +1122,18 @@ test("validateConfig rejects invalid maxRounds values", () => {
   assert.throws(() => validateConfig({ maxRounds: "4", participants }));
 });
 
+test("validateConfig: autoExportDirは既定'exports'・明示値保持・不正値はthrow", () => {
+  const participants = [{ id: "a", name: "A", adapter: "claude", enabled: true }];
+  assert.equal(validateConfig({ participants }).autoExportDir, "exports");
+  assert.equal(
+    validateConfig({ participants, autoExportDir: "my-exports" }).autoExportDir,
+    "my-exports"
+  );
+  assert.throws(() => validateConfig({ participants, autoExportDir: "" }));
+  assert.throws(() => validateConfig({ participants, autoExportDir: "   " }));
+  assert.throws(() => validateConfig({ participants, autoExportDir: 123 }));
+});
+
 test("validateConfig requires a non-empty participant name", () => {
   assert.throws(() =>
     validateConfig({ participants: [{ id: "a", adapter: "claude", enabled: true }] })

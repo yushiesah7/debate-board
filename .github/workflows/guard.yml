@@ -5,9 +5,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: state/ と config.json がコミットされていないことを確認
+      - name: state/ と config.json と exports/ がコミットされていないことを確認
         run: |
           bad=$(git ls-files | grep -E '^state/.+' | grep -v '^state/\.gitkeep$' || true)
           if [ -n "$bad" ]; then echo "::error::state/ 配下がコミットされています:"; echo "$bad"; exit 1; fi
           if git ls-files | grep -qx 'config.json'; then echo "::error::config.json がコミットされています"; exit 1; fi
-          echo "OK: 議論データ・ローカル設定は含まれていません"
+          badexp=$(git ls-files | grep -E '^exports/' || true)
+          if [ -n "$badexp" ]; then echo "::error::exports/ 配下（自動エクスポート）がコミットされています:"; echo "$badexp"; exit 1; fi
+          echo "OK: 議論データ・ローカル設定・自動エクスポートは含まれていません"

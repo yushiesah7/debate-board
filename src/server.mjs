@@ -21,7 +21,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { loadConfig } from './config.mjs';
-import { createDebate, saveBoard, applyCardOps, loadTranscript, normalizeRules } from './state.mjs';
+import { createDebate, saveBoard, applyCardOps, loadTranscript, appendTranscript, normalizeRules } from './state.mjs';
+import { buildInterjectPrompt, composeRulesFor, boardSummary, TURN_SCHEMA } from './prompt.mjs';
 import { runDebate } from './engine.mjs';
 import { resolveAdapter } from './adapters/index.mjs';
 import { makeHuman, HUMAN_TIMEOUT_MS } from './adapters/human.mjs';
@@ -60,6 +61,51 @@ export function readDefaultRules(rulesPath) {
   } catch {
     return '';
   }
+}
+
+/** POST /api/interject の依頼テキストの最大文字数。超過は400。 */
+const MAX_INTERJECT_CHARS = 4000;
+
+/**
+ * 議論のrules/notesをJSONファイルとして書き出す（自動エクスポート本体。server/CLI共用）。
+ * ファイル名: `<YYYYMMDD-HHmmss>_<お題スラッグ最大20字>-rules.json` / 同prefix `-notes.json`
+ * （GUIの手動エクスポートと同形式）。ディレクトリは無ければ再帰作成。
+ * 書き込み失敗はthrowする（呼び出し側でcatchしてconsole.errorのみ＝議論は壊さない）。
+ * @param {string} dirPath - 書き出し先ディレクトリ（絶対パス推奨）
+ * @param {object} board
+ * @returns {string[]} 書き出したファイル名（2件）
+ */
+export function exportDebateArtifacts(dirPath, board) {
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const slug =
+    String(board?.meta?.topic ?? '')
+      .replace(/[\\/:*?"<>|\s]+/g, '-') // Windowsで不正なファイル名文字と空白を除去
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 20) || 'debate';
+  const prefix = `${stamp}_${slug}`;
+
+  const rules = normalizeRules(board?.meta?.rules);
+  const rulesJson = {
+    type: 'debate-board-rules',
+    version: 1,
+    common: rules.common,
+    participants: { ...rules.byId },
+  };
+  const notesJson = {
+    type: 'debate-board-notes',
+    version: 1,
+    notes: board?.notes ?? {},
+    summary: board?.summary ?? null,
+    cards: (board?.cards ?? []).map((c) => ({ lane: c.lane, title: c.title, body: c.body })),
+  };
+
+  fs.mkdirSync(dirPath, { recursive: true });
+  const files = [`${prefix}-rules.json`, `${prefix}-notes.json`];
+  fs.writeFileSync(path.join(dirPath, files[0]), JSON.stringify(rulesJson, null, 2), 'utf8');
+  fs.writeFileSync(path.join(dirPath, files[1]), JSON.stringify(notesJson, null, 2), 'utf8');
+  return files;
 }
 
 /** @param {number} ms */
@@ -184,6 +230,19 @@ export function createServer({
    * @type {null | {participantId: string, round: number|null, phase: 'turn'|'synthesis', since: string}}
    */
   let speaking = null;
+
+  /**
+   * 自動エクスポート先（config.autoExportDir。相対パスはリポルート基準に解決）。
+   * テスト等でconfigオブジェクトに autoExportDir が無い場合は自動エクスポート無効
+   * （loadConfig経由の実運用では常に既定 "exports" が入る）。
+   * @type {string|null}
+   */
+  const autoExportPath =
+    typeof config.autoExportDir === 'string' && config.autoExportDir.trim() !== ''
+      ? path.isAbsolute(config.autoExportDir)
+        ? config.autoExportDir
+        : path.join(__dirname, '..', config.autoExportDir)
+      : null;
 
   /** @param {{type:string, [k:string]:any}} event */
   function broadcast(event) {
@@ -318,6 +377,8 @@ export function createServer({
         speaker: speaker ? speaker.name : e.participantId,
         text: typeof e.utterance === 'string' ? e.utterance : '',
         ts: e.timestamp ?? null,
+        // 割り込み依頼（interject）のバッジ表示用（通常発言では undefined）
+        ...(e.interject ? { interject: e.interject, targetId: e.targetId ?? null } : {}),
       };
     });
   }
@@ -423,6 +484,15 @@ export function createServer({
     }
     if (event.type === 'ended') {
       speaking = null; // シンセシス完了含む
+      // 議論終了時の自動エクスポート（失敗しても議論は壊さない: console.errorのみ）
+      if (autoExportPath && currentBoard) {
+        try {
+          const files = exportDebateArtifacts(autoExportPath, currentBoard);
+          broadcast({ type: 'auto-export', files });
+        } catch (err) {
+          console.error('auto-export failed:', err?.message ?? err);
+        }
+      }
       // 'update'も併せて流す: GUI側の既存ハンドラ（update時に/api/state再取得）だけでも
       // summaryが反映されるようにするための保険（'ended'固有ハンドラが無くても壊れない）
       broadcast({ type: 'update' });
@@ -573,6 +643,7 @@ export function createServer({
       '/api/participant': handleParticipant,
       '/api/session-rules': handleSessionRules,
       '/api/import-notes': handleImportNotes,
+      '/api/interject': handleInterject,
       '/api/card': handleCard,
       '/api/say': handleSay,
       '/api/skip': handleSkip,
@@ -1038,6 +1109,136 @@ export function createServer({
     }
 
     saveBoard(stateDir, currentBoard);
+    broadcast({ type: 'update' });
+    return sendJson(res, 200, buildStateResponse());
+  }
+
+  /**
+   * POST /api/interject — オーナー（人間）から特定の参加AIへの割り込み依頼。
+   * - `{participantId, text}`（text非空・最大4000字。human宛・不明pidは400。議論が一度も無ければ400）
+   * - AI発言中（speaking≠null。ただしhumanの入力待ちは除く）は409
+   * - 実行中(running)なら一時的にpausedへ（既存pauseゲートが次ターンを止める）→
+   *   対象アダプタを1回呼び、結果をtranscriptへ2エントリ（request/reply）追記して
+   *   cardOps/noteUpdateを通常どおり適用→runningへ復帰
+   * - 元がended/pausedならstatusはそのまま維持（**endedはendedのまま**＝終了後も応答可能）
+   * - 実行中は speaking を phase:'interject' にし、onProgress経由のライブ表示も流れる
+   * @param {object} body
+   * @param {import('node:http').ServerResponse} res
+   */
+  async function handleInterject(body, res) {
+    if (!currentBoard) return sendError(res, 400, 'no debate to interject into');
+    if (typeof body.participantId !== 'string' || body.participantId === '') {
+      return sendError(res, 400, 'participantId (string) is required');
+    }
+    const participant = currentBoard.participants.find((p) => p.id === body.participantId);
+    if (!participant) return sendError(res, 400, `unknown participant id "${body.participantId}"`);
+    if (participant.adapter === 'human') {
+      return sendError(res, 400, 'cannot interject a human participant');
+    }
+    if (typeof body.text !== 'string' || body.text.trim() === '') {
+      return sendError(res, 400, 'text (non-empty string) is required');
+    }
+    if (body.text.length > MAX_INTERJECT_CHARS) {
+      return sendError(res, 400, `text must be at most ${MAX_INTERJECT_CHARS} characters`);
+    }
+    // AIの発言中は409（humanの入力待ち中はエンジンが停止しているので許可＝入力バーと両立）
+    const humanWaiting = awaitingHuman && speaking && speaking.participantId === awaitingHuman.participantId;
+    if (speaking && !humanWaiting) {
+      return sendError(res, 409, '発言が終わってから送ってください');
+    }
+
+    const board = currentBoard;
+    const requestText = body.text;
+    const pid = participant.id;
+    const wasRunning = board.meta.status === 'running';
+    if (wasRunning) {
+      board.meta.status = 'paused'; // 既存pauseゲートで次の通常ターンを待たせる
+      saveBoard(stateDir, board);
+    }
+    const prevSpeaking = speaking;
+    speaking = { participantId: pid, round: board.meta.round, phase: 'interject', since: new Date().toISOString() };
+    broadcast({ type: 'interject-start', participantId: pid });
+
+    try {
+      // 通常ターンと同じ文脈でctxを組み立てる（rulesは本人の個別ルール込み）
+      const { entries } = loadTranscript(stateDir, board.meta.id);
+      const recentTranscript = entries.slice(-10);
+      const rules = composeRulesFor(board.meta.rules, pid);
+      const ownNote = board.notes[pid] ?? '';
+      const promptText = buildInterjectPrompt({
+        participant,
+        topic: board.meta.topic,
+        board,
+        ownNote,
+        recentTranscript,
+        rules,
+        requestText,
+      });
+      const ctx = {
+        participant,
+        topic: board.meta.topic,
+        round: board.meta.round,
+        maxRounds: board.meta.maxRounds,
+        boardSummary: boardSummary(board),
+        ownNote,
+        recentTranscript,
+        rules,
+        schemaJson: TURN_SCHEMA,
+        promptText,
+        prompt: promptText,
+        interject: true,
+      };
+
+      // pauseゲートは通さない（この呼び出し自体が意図的な割り込みのため）。進捗配信は通常どおり
+      const inner =
+        injectedAdapters && injectedAdapters[pid]
+          ? injectedAdapters[pid]
+          : { speak: resolveAdapter(participant.adapter) };
+      const adapter = withProgress(inner, pid);
+
+      let result;
+      try {
+        result = await adapter.speak(ctx);
+      } catch (err) {
+        result = { pass: true, error: err?.message ?? String(err) };
+      }
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        result = { pass: true, error: 'invalid TurnResult: not an object' };
+      }
+      const utterance = typeof result.utterance === 'string' ? result.utterance : '';
+      const { applied, warnings } = applyCardOps(board, Array.isArray(result.cardOps) ? result.cardOps : [], pid);
+      if (typeof result.noteUpdate === 'string') {
+        board.notes[pid] = result.noteUpdate;
+      }
+
+      // transcriptへ request / reply の2エントリ追記
+      appendTranscript(stateDir, board.meta.id, {
+        round: board.meta.round,
+        participantId: 'owner',
+        utterance: requestText,
+        interject: 'request',
+        targetId: pid,
+      });
+      appendTranscript(stateDir, board.meta.id, {
+        round: board.meta.round,
+        participantId: pid,
+        utterance,
+        pass: !!result.pass,
+        cardOps: applied,
+        warnings,
+        error: result.error ?? null,
+        interject: 'reply',
+      });
+      saveBoard(stateDir, board);
+    } finally {
+      speaking = prevSpeaking ?? null;
+      // runningから一時pausedにした場合のみ復帰（元がended/pausedならそのまま維持）
+      if (wasRunning && board.meta.status === 'paused') {
+        board.meta.status = 'running';
+        saveBoard(stateDir, board);
+      }
+    }
+
     broadcast({ type: 'update' });
     return sendJson(res, 200, buildStateResponse());
   }

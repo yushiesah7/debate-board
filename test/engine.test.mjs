@@ -11,7 +11,7 @@ import os from 'node:os';
 
 import { createDebate, loadDebate, saveBoard, appendTranscript, loadTranscript, applyCardOps } from '../src/state.mjs';
 import { runDebate } from '../src/engine.mjs';
-import { TURN_SCHEMA, buildTurnPrompt, buildSynthesisPrompt, composeRulesFor } from '../src/prompt.mjs';
+import { TURN_SCHEMA, buildTurnPrompt, buildSynthesisPrompt, buildInterjectPrompt, composeRulesFor } from '../src/prompt.mjs';
 
 const TOPIC = 'きのこ vs たけのこ';
 
@@ -738,4 +738,45 @@ test('実行中のboard.meta.maxRounds増加（延長）がループ条件に効
   assert.equal(board.meta.round, 4);
   assert.equal(board.meta.status, 'ended');
   assert.equal(board.meta.endedBy, 'maxRounds');
+});
+
+// --------------------------------------------------------------------
+// 割り込み依頼プロンプト（buildInterjectPrompt）
+// --------------------------------------------------------------------
+
+test('buildInterjectPrompt: 依頼文・ルール・かんばん・NOTE・直近発言・出力契約を含む', () => {
+  const board = {
+    cards: [{ id: 'c1', lane: 'decided', title: 'ダミー決定', body: '本文' }],
+  };
+  const prompt = buildInterjectPrompt({
+    participant: { id: 'a', name: 'A', persona: 'ダミーペルソナ' },
+    topic: TOPIC,
+    board,
+    ownNote: 'ダミーNOTE',
+    recentTranscript: [{ round: 1, participantId: 'b', utterance: 'Bの直近発言' }],
+    rules: composeRulesFor(
+      { defaultSnapshot: 'デフォX', common: '共通X', byId: { a: 'A個別X' } },
+      'a'
+    ),
+    requestText: '追加の観点を1つ挙げてください',
+  });
+  assert.ok(prompt.includes('参加者「A」'));
+  assert.ok(prompt.includes('ダミーペルソナ'));
+  assert.ok(prompt.includes(`お題: ${TOPIC}`));
+  assert.ok(prompt.includes('--- ルール（厳守） ---'));
+  assert.ok(prompt.includes('A個別X')); // composeRulesFor経由で本人の個別ルール込み
+  assert.ok(prompt.includes('ダミー決定')); // かんばん要約
+  assert.ok(prompt.includes('ダミーNOTE'));
+  assert.ok(prompt.includes('Bの直近発言'));
+  assert.ok(prompt.includes('オーナー（人間）からあなた個人への割り込み依頼'));
+  assert.ok(prompt.includes('追加の観点を1つ挙げてください'));
+  assert.ok(prompt.includes('"utterance"')); // TURN_SCHEMA出力契約
+  // ルール無しならセクション省略
+  const noRules = buildInterjectPrompt({
+    participant: { id: 'a', name: 'A' },
+    topic: TOPIC,
+    board,
+    requestText: 'x',
+  });
+  assert.ok(!noRules.includes('--- ルール（厳守） ---'));
 });
