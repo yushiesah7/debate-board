@@ -386,7 +386,7 @@
   <div id="round-display">ラウンド -</div>
   <div id="status-display" class="status-idle">停止中</div>
   <div id="header-actions">
-    <button id="btn-rules" style="display:none;" title="この議論に適用中のルールを表示">📜ルール</button>
+    <button id="btn-rules" title="参加AIのルールを表示・編集">📜ルール</button>
     <button id="btn-start" class="primary">開始</button>
     <button id="btn-pause">一時停止</button>
     <button id="btn-end" class="danger">終了</button>
@@ -471,13 +471,23 @@
   </div>
 </div>
 
-<!-- ルール表示モーダル（読み取り専用） -->
+<!-- ルールモーダル（基本ルール編集＋今回の議論のルール表示） -->
 <div class="modal-overlay" id="rules-modal">
-  <div class="modal-box">
-    <h3>📜 この議論のルール</h3>
-    <div id="rules-modal-body" style="font-size:13px; white-space:pre-wrap; word-break:break-word; max-height:60vh; overflow-y:auto; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px;"></div>
+  <div class="modal-box" style="width:560px;">
+    <h3>📜 参加AIのルール</h3>
+
+    <label for="rules-base-input">基本ルール（PARTICIPANT_RULES.md・常時適用）</label>
+    <textarea id="rules-base-input" maxlength="8000" style="font-family:Consolas,Monaco,monospace; min-height:160px;"></textarea>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-top:6px;">
+      <div style="font-size:11px; color:var(--text-dim);">保存すると次の議論から反映されます</div>
+      <button id="rules-base-save" class="primary">保存</button>
+    </div>
+
+    <label style="margin-top:16px;">今回の議論のルール</label>
+    <div id="rules-current-body" style="font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:30vh; overflow-y:auto; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px;"></div>
+
     <div class="modal-actions">
-      <button id="rules-modal-close" class="primary">閉じる</button>
+      <button id="rules-modal-close">閉じる</button>
     </div>
   </div>
 </div>
@@ -791,13 +801,6 @@
     renderTabs();
     renderTabContent();
     renderHumanTurn();
-    renderRulesButton();
-  }
-
-  function renderRulesButton() {
-    var btn = document.getElementById("btn-rules");
-    var rules = state.board.meta && state.board.meta.rules;
-    btn.style.display = (typeof rules === "string" && rules.trim().length > 0) ? "" : "none";
   }
 
   function renderSummary() {
@@ -1267,13 +1270,69 @@
   });
 
   // ------------------------------------------------------------------
-  // ルール表示モーダル（読み取り専用）
+  // ルールモーダル（基本ルール編集＋今回の議論のルール表示）
   // ------------------------------------------------------------------
-  document.getElementById("btn-rules").addEventListener("click", function () {
+  var MOCK_BASE_RULES_SAMPLE =
+    "# 参加AIの基本ルール（モック表示サンプル）\n" +
+    "- あなたは議論の参加者。PCのファイル閲覧は議論の根拠収集のためだけに使う\n" +
+    "- 出力契約（JSON形式）を必ず守る";
+
+  function renderCurrentRulesSection() {
+    var body = document.getElementById("rules-current-body");
     var rules = (state && state.board.meta && state.board.meta.rules) || "";
-    document.getElementById("rules-modal-body").textContent = rules;
+    if (typeof rules === "string" && rules.trim().length > 0) {
+      body.textContent = rules;
+    } else {
+      body.textContent = "議論開始時に、基本ルール＋開始モーダルの追加ルールが合成されて各AIに毎ターン渡されます";
+    }
+  }
+
+  document.getElementById("btn-rules").addEventListener("click", function () {
+    renderCurrentRulesSection();
+    var input = document.getElementById("rules-base-input");
+    if (MOCK) {
+      input.value = MOCK_BASE_RULES_SAMPLE;
+      document.getElementById("rules-modal").classList.add("show");
+      return;
+    }
+    input.value = "";
+    input.placeholder = "読み込み中...";
     document.getElementById("rules-modal").classList.add("show");
+    fetch("/api/rules").then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status + " /api/rules");
+      return res.json();
+    }).then(function (data) {
+      input.value = (data && typeof data.baseRules === "string") ? data.baseRules : "";
+      input.placeholder = "";
+    }).catch(function (err) {
+      console.error("rules fetch failed:", err);
+      input.placeholder = "";
+      showToast("基本ルールの読み込みに失敗しました");
+    });
   });
+
+  document.getElementById("rules-base-save").addEventListener("click", function () {
+    var text = document.getElementById("rules-base-input").value;
+    if (MOCK) {
+      log("POST", "/api/rules", { baseRules: text });
+      showToast("モックモードでは保存されません");
+      return;
+    }
+    fetch("/api/rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ baseRules: text })
+    }).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status + " /api/rules");
+      return res.json();
+    }).then(function () {
+      showToast("保存しました。次の議論から反映されます");
+    }).catch(function (err) {
+      console.error("rules save failed:", err);
+      showToast("基本ルールの保存に失敗しました");
+    });
+  });
+
   document.getElementById("rules-modal-close").addEventListener("click", function () {
     document.getElementById("rules-modal").classList.remove("show");
   });

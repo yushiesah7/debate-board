@@ -35,6 +35,9 @@ const DEFAULT_RULES_PATH = path.join(__dirname, '..', 'PARTICIPANT_RULES.md');
 /** /api/start の追加ルール（rules）の最大文字数。超過は400。 */
 const MAX_EXTRA_RULES_CHARS = 4000;
 
+/** POST /api/rules の基本ルール（baseRules）の最大文字数。超過は400。 */
+const MAX_BASE_RULES_CHARS = 8000;
+
 /** POSTボディの上限（暴走・DoS対策のガード。ローカル専用アプリなので大きめでよい）。 */
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -394,6 +397,20 @@ export function createServer({
       return serveOptions(res);
     }
 
+    if (pathname === '/api/rules') {
+      if (req.method === 'GET') return serveRules(res);
+      if (req.method === 'POST') {
+        let body;
+        try {
+          body = await readJsonBody(req);
+        } catch (err) {
+          return sendError(res, 400, err.message);
+        }
+        return handleRulesPost(body, res);
+      }
+      return sendError(res, 405, 'method not allowed');
+    }
+
     const postRoutes = {
       '/api/start': handleStart,
       '/api/pause': handlePause,
@@ -418,6 +435,44 @@ export function createServer({
     }
 
     return sendError(res, 404, 'not found');
+  }
+
+  /**
+   * GET /api/rules — 基本ルールファイル（rulesPath=PARTICIPANT_RULES.md）の現在の中身を返す。
+   * 毎回ファイルから読む（キャッシュしない）。ファイルが無ければ baseRules は ""。
+   * @param {import('node:http').ServerResponse} res
+   */
+  function serveRules(res) {
+    let baseRules = '';
+    try {
+      baseRules = fs.readFileSync(rulesPath, 'utf8');
+    } catch {
+      baseRules = '';
+    }
+    return sendJson(res, 200, { baseRules });
+  }
+
+  /**
+   * POST /api/rules — 基本ルールファイルを書き換える。
+   * saveBoard同様、tmpファイル→renameSync で原子的に書き込む。
+   * **実行中の議論には影響しない**: board.meta.rules は開始時に合成・固定されるため、
+   * ここでの変更は次の /api/start（または CLI 実行）から反映される。
+   * @param {object} body
+   * @param {import('node:http').ServerResponse} res
+   */
+  function handleRulesPost(body, res) {
+    if (typeof body.baseRules !== 'string') {
+      return sendError(res, 400, 'baseRules (string) is required');
+    }
+    if (body.baseRules.length > MAX_BASE_RULES_CHARS) {
+      return sendError(res, 400, `baseRules must be at most ${MAX_BASE_RULES_CHARS} characters`);
+    }
+    const dir = path.dirname(rulesPath);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${rulesPath}.tmp`;
+    fs.writeFileSync(tmp, body.baseRules, 'utf8');
+    fs.renameSync(tmp, rulesPath);
+    return sendJson(res, 200, { baseRules: body.baseRules });
   }
 
   /**

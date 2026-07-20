@@ -776,6 +776,83 @@ test('POST /api/start: rulesがフェイクアダプタのpromptTextに注入さ
   }
 });
 
+// --------------------------------------------------------------------
+// GET/POST /api/rules（基本ルールのGUI編集）
+// --------------------------------------------------------------------
+
+test('GET /api/rules: ファイル内容が返る／ファイル無しは空文字', async (t) => {
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-rules-api-'));
+  const rulesPath = path.join(rulesDir, 'PARTICIPANT_RULES.md');
+  fs.writeFileSync(rulesPath, 'ダミー基本ルール本文', 'utf8');
+  const { baseUrl } = await startServerWithRulesPath(t, rulesPath);
+  const res = await getJson(`${baseUrl}/api/rules`);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.baseRules, 'ダミー基本ルール本文');
+
+  // ファイル無しのサーバ: baseRulesは""
+  const { baseUrl: baseUrl2 } = await startServerWithRulesPath(t, path.join(rulesDir, 'no-such.md'));
+  const res2 = await getJson(`${baseUrl2}/api/rules`);
+  assert.equal(res2.status, 200);
+  assert.equal(res2.body.baseRules, '');
+});
+
+test('POST /api/rules: rulesPathへ保存されGETと次のstartに反映される', async (t) => {
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-rules-api2-'));
+  const rulesPath = path.join(rulesDir, 'PARTICIPANT_RULES.md');
+  const { baseUrl } = await startServerWithRulesPath(t, rulesPath);
+
+  const newRules = '# 更新後のダミー基本ルール\n- 新項目';
+  const post = await postJson(`${baseUrl}/api/rules`, { baseRules: newRules });
+  assert.equal(post.status, 200);
+  assert.equal(post.body.baseRules, newRules);
+
+  // ファイルに反映されている（tmpファイルは残っていない＝rename済み）
+  assert.equal(fs.readFileSync(rulesPath, 'utf8'), newRules);
+  assert.ok(!fs.existsSync(`${rulesPath}.tmp`), '原子的書き込みのtmpファイルが残っていないこと');
+
+  // POST後のGETが新内容を返す
+  const get = await getJson(`${baseUrl}/api/rules`);
+  assert.equal(get.body.baseRules, newRules);
+
+  // 次のstartで新しい基本ルールが合成される
+  const start = await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 2 });
+  assert.equal(start.status, 200);
+  assert.ok(start.body.board.meta.rules.includes('更新後のダミー基本ルール'));
+});
+
+test('POST /api/rules: 非string・8000字超は400（8000字ちょうどはOK）', async (t) => {
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-rules-api3-'));
+  const rulesPath = path.join(rulesDir, 'PARTICIPANT_RULES.md');
+  const { baseUrl } = await startServerWithRulesPath(t, rulesPath);
+
+  const badType = await postJson(`${baseUrl}/api/rules`, { baseRules: 123 });
+  assert.equal(badType.status, 400);
+  const missing = await postJson(`${baseUrl}/api/rules`, {});
+  assert.equal(missing.status, 400);
+  const tooLong = await postJson(`${baseUrl}/api/rules`, { baseRules: 'あ'.repeat(8001) });
+  assert.equal(tooLong.status, 400);
+  assert.ok(!fs.existsSync(rulesPath), '400のときファイルは書き込まれないこと');
+
+  const exact = await postJson(`${baseUrl}/api/rules`, { baseRules: 'あ'.repeat(8000) });
+  assert.equal(exact.status, 200);
+  assert.equal(fs.readFileSync(rulesPath, 'utf8').length, 8000);
+});
+
+test('POST /api/rules: 実行中の議論のboard.meta.rulesには影響しない', async (t) => {
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-rules-api4-'));
+  const rulesPath = path.join(rulesDir, 'PARTICIPANT_RULES.md');
+  fs.writeFileSync(rulesPath, '開始時のダミー基本', 'utf8');
+  const { baseUrl } = await startServerWithRulesPath(t, rulesPath);
+
+  await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 5 });
+  const before = await getJson(`${baseUrl}/api/state`);
+  assert.equal(before.body.board.meta.rules, '開始時のダミー基本');
+
+  await postJson(`${baseUrl}/api/rules`, { baseRules: '書き換え後のダミー基本' });
+  const after = await getJson(`${baseUrl}/api/state`);
+  assert.equal(after.body.board.meta.rules, '開始時のダミー基本'); // 実行中は変わらない
+});
+
 test('サーバは静的にpublic/index.htmlを配信する', async (t) => {
   const { baseUrl } = await startTestServer(t);
   const res = await fetch(`${baseUrl}/`);

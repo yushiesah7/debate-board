@@ -35,7 +35,7 @@ grokの `--max-turns` はツール使用の周回上限（1発言の所要時間
 
 ### 参加AIのルール
 
-- **基本ルール**: リポ直下の `PARTICIPANT_RULES.md`（コミット対象）。議論**開始のたびに**読み込むため、編集は次の議論から反映。ファイルが無ければ空扱い
+- **基本ルール**: リポ直下の `PARTICIPANT_RULES.md`（コミット対象）。議論**開始のたびに**読み込むため、編集は次の議論から反映。ファイルが無ければ空扱い。GUI（📜ルールボタン）からも編集可（`GET/POST /api/rules`）
 - **今回の追加ルール**: 開始時に指定（GUI開始モーダル／`POST /api/start` の `rules`／CLI第3引数）。最大4000字
 - 合成: `基本 + "\n\n## 今回の追加ルール\n" + 追加` をサーバ/CLI側で行い `board.meta.rules` に保存（エンジン/stateはfsを読まない純ロジックを維持）
 - 注入: 毎ターンおよびシンセシスのプロンプトで、お題の直後に「--- ルール（厳守） ---」セクションとして挿入（rulesが空ならセクションごと省略）
@@ -136,6 +136,8 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |
 | POST `/api/end` | `{}` |
 | POST `/api/toggle` | `{id, enabled}` |
+| GET `/api/rules` | 応答 `{baseRules: string}` — `PARTICIPANT_RULES.md` の現在の中身（無ければ`""`）。毎回ファイルから読む |
+| POST `/api/rules` | `{baseRules: string}`（string以外400・最大8000字超過400）。ファイルへ原子的書き込み。応答 `{baseRules}`。**実行中の議論には影響しない**（次のstartから反映） |
 | POST `/api/participant` | `{id, model?, effort?, pcAccess?}`（`model`/`effort`は非空文字列で設定、`null`か空文字でそのフィールドを削除=CLI既定継承。`pcAccess`は`"read"`\|`"full"`のみ、CLI系（claude/codex/grok）以外は無視。human参加者は全フィールド無視（400にはしない）。不正id・不正pcAccessは400。config.jsonへ永続化し、実行中なら該当参加者の次ターンから反映） |
 | POST `/api/card` | `{op:"add"\|"move"\|"edit", cardId?, lane?, title?, body?}`（編集でレーン変更する場合はedit→moveの2リクエスト可） |
 | POST `/api/say` | `{text}`（awaitingHuman時のみ有効） |
