@@ -147,7 +147,7 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 | POST `/api/session-rules` | `{common?: string, byId?: {<pid>: string}}` 部分更新マージ。byIdの値`""`はそのエントリ削除。common/各エントリ最大4000字（超過400）・非string 400・不正pid 400。idle時=開始前ステージングへ／実行中=board.meta.rulesをmutate＋saveBoard＋SSE update（**次ターンから反映**） |
 | POST `/api/import-notes` | `{notes?: {<pid>: string}, cards?: [{lane,title,body}]}`。実行中の議論が無ければ**409**。notesは既知pidのみ上書きマージ（未知pidスキップ）、cardsは既存カードへ**追加**（新規ID採番・createdBy="import"）、summaryは上書きしない（無視） |
 | POST `/api/participant` | `{id, model?, effort?, pcAccess?}`（`model`/`effort`は非空文字列で設定、`null`か空文字でそのフィールドを削除=CLI既定継承。`pcAccess`は`"read"`\|`"full"`のみ、CLI系（claude/codex/grok）以外は無視。human参加者は全フィールド無視（400にはしない）。不正id・不正pcAccessは400。config.jsonへ永続化し、実行中なら該当参加者の次ターンから反映） |
-| POST `/api/card` | `{op:"add"\|"move"\|"edit", cardId?, lane?, title?, body?}`（編集でレーン変更する場合はedit→moveの2リクエスト可） |
+| POST `/api/card` | `{op:"add"\|"move"\|"edit", cardId?, lane?, title?, body?}`（編集でレーン変更する場合はedit→moveの2リクエスト可。議論未開始は400。不正op（title欠落・存在しないcardId等）は適用されず200応答に `warnings: string[]` が付く） |
 | POST `/api/say` | `{text}`（awaitingHuman時のみ有効） |
 | POST `/api/skip` | `{}`（同上） |
 | POST `/api/note` | `{text}`（human参加者自身のNOTE更新） |

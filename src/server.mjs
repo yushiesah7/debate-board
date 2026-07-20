@@ -878,10 +878,14 @@ export function createServer({
     if (!currentBoard) return sendError(res, 400, 'no debate in progress');
     if (typeof body.op !== 'string') return sendError(res, 400, 'op is required');
     const byId = findHumanId();
-    applyCardOps(currentBoard, [body], byId);
+    // warningsを握りつぶさない: 不正op（title欠落・存在しないcardId等）は適用されずに
+    // warningsへ積まれるので、応答に含めてGUIが警告トーストを出せるようにする（200のまま）
+    const { warnings } = applyCardOps(currentBoard, [body], byId);
     saveBoard(stateDir, currentBoard);
     broadcast({ type: 'update' });
-    return sendJson(res, 200, buildStateResponse());
+    const response = buildStateResponse();
+    if (warnings.length > 0) response.warnings = warnings;
+    return sendJson(res, 200, response);
   }
 
   function handleSay(body, res) {

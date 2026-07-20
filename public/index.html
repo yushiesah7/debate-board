@@ -253,6 +253,9 @@
     border-style: dashed;
     color: var(--text-dim);
   }
+  /* 議論未開始（idle）でカード操作がロック中の見た目（クリックは受けて案内トーストを出す） */
+  .add-card-btn.locked { opacity: 0.4; cursor: not-allowed; }
+  .add-card-btn.locked:hover { border-color: var(--border); }
 
   #side {
     flex: 2;
@@ -639,6 +642,25 @@
     return !!(s && s.board && s.board.meta && Array.isArray(s.participants));
   }
 
+  // 議論未開始（idle）の間はカード操作をロックする（サーバが400を返すため）。
+  // モックモードはお試し用に従来どおり自由。
+  function cardsLocked() {
+    if (MOCK) return false;
+    var status = state && state.board.meta && state.board.meta.status;
+    return !status || status === "idle";
+  }
+
+  var endedCardNoticeShown = false; // ended後のカード操作の情報トーストは一度だけ
+
+  function maybeNotifyEndedCardEdit() {
+    if (MOCK) return;
+    var status = state && state.board.meta && state.board.meta.status;
+    if (status === "ended" && !endedCardNoticeShown) {
+      endedCardNoticeShown = true;
+      showToast("この議論は終了しています。編集は保存されますが次の議論には引き継がれません（notes.jsonエクスポートで持ち出せます）");
+    }
+  }
+
   // ------------------------------------------------------------------
   // API 呼び出し
   //  - mockモード: ローカルstateに適用して即描画
@@ -664,6 +686,10 @@
         state = data;
         myParticipantId = detectMyParticipantId();
         render();
+      }
+      // サーバが黙って捨てず warnings を返してきたら警告トースト（例: title欠落のadd）
+      if (data && Array.isArray(data.warnings) && data.warnings.length > 0) {
+        showToast("カード操作が一部無視されました: " + data.warnings.join(" / "));
       }
       return { ok: true, data: data };
     }).catch(function (err) {
@@ -846,6 +872,14 @@
       statusEl.className = st.cls;
     }
 
+    // 新しい議論が動き出したらended用の情報トーストフラグをリセット
+    if (meta.status === "running") endedCardNoticeShown = false;
+    // idleロック中は「+カード追加」を無効化見た目に
+    var locked = cardsLocked();
+    document.querySelectorAll(".add-card-btn").forEach(function (btn) {
+      btn.classList.toggle("locked", locked);
+    });
+
     renderParticipants();
     renderSummary();
     renderBoard();
@@ -941,7 +975,7 @@
   function renderCard(card) {
     var el = document.createElement("div");
     el.className = "card";
-    el.draggable = true;
+    el.draggable = !cardsLocked(); // idleロック中はDnD不可（クリック編集はモーダル保存側でガード）
     el.dataset.cardId = card.id;
     el.innerHTML =
       '<div class="card-title"></div>' +
@@ -1119,8 +1153,13 @@
       var lane = laneEl.dataset.lane;
       var cardId = draggedCardId;
       if (!cardId) return;
+      if (cardsLocked()) {
+        showToast("議論を開始するとカードを追加できます");
+        return;
+      }
       var card = state.board.cards.find(function (c) { return c.id === cardId; });
       if (card && card.lane === lane) return; // no-op
+      maybeNotifyEndedCardEdit();
       apiPost("/api/card", { op: "move", cardId: cardId, lane: lane });
     });
   });
@@ -1159,6 +1198,10 @@
 
   document.querySelectorAll(".add-card-btn").forEach(function (btn) {
     btn.addEventListener("click", function () {
+      if (cardsLocked()) {
+        showToast("議論を開始するとカードを追加できます");
+        return;
+      }
       openAddCardModal(btn.dataset.lane);
     });
   });
@@ -1168,10 +1211,16 @@
     if (e.target.id === "card-modal") closeCardModal();
   });
   document.getElementById("card-modal-save").addEventListener("click", function () {
+    if (cardsLocked()) {
+      showToast("議論を開始するとカードを追加できます");
+      closeCardModal();
+      return;
+    }
     var lane = document.getElementById("card-modal-lane").value;
     var title = document.getElementById("card-modal-title-input").value.trim();
     var body = document.getElementById("card-modal-body-input").value;
     if (!title) { document.getElementById("card-modal-title-input").focus(); return; }
+    maybeNotifyEndedCardEdit();
     if (cardModalMode === "add") {
       apiPost("/api/card", { op: "add", lane: lane, title: title, body: body });
     } else {
