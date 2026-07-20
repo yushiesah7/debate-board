@@ -8,7 +8,8 @@
   - 参加者設定GUI: 各チップ⚙→モーダル（datalist候補+自由入力）、POST /api/participant 新設、config.jsonへ原子的永続化、実行中は次ターン反映
   - 既存バグ2件修正: createDebateのpcAccess/effort引継ぎ漏れ（実行時に効かない）、8787の残存サーバプロセス掃除
   - 候補自動発見（GET /api/options）: codex=models_cache.json／grok=`grok models`／ollama=/api/tags／oai=/v1/models から実環境のモデル候補を収集し⚙モーダルのdatalistに反映（10分キャッシュ・失敗は静的フォールバック）。EADDRINUSE時の日本語ガイドも追加
-  - 参加AIルール注入: 基本=PARTICIPANT_RULES.md（start毎読込・git管理）＋議論ごとの追加ルール（/api/start rules・CLI第3引数・開始モーダルtextarea）を合成し、毎ターン＋シンセシスのプロンプトへ「ルール（厳守）」として注入。📜表示ボタン付き。テスト148件全緑
+  - 参加AIルール注入: 基本=PARTICIPANT_RULES.md（start毎読込・git管理）＋議論ごとの追加ルール（/api/start rules・CLI第3引数・開始モーダルtextarea）を合成し、毎ターン＋シンセシスのプロンプトへ「ルール（厳守）」として注入
+  - 📜ルールGUI完結化: 常時表示ボタン→基本ルールの閲覧・編集・保存（GET/POST /api/rules、次の議論から反映）＋今回の合成ルール閲覧。テスト152件全緑
   - 検証: テスト131件全緑、実CLIスモーク3種、effort有効での実3AI議論完走、APIライブ確認（POST反映＋config永続化）
 - 意図的に触らなかったもの: web検索の開閉オプション（pcAccessとは別軸。要望があれば追加）、/api/toggleの404/400不整合（既存仕様のまま）
 - 完了・未完了: 完了。push済み（main 0aa2bd6）
