@@ -139,7 +139,7 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 | GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy,rules:{default,common,byId}},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, speaking:null\|{participantId,round,phase:"turn"\|"synthesis",since}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`。`speaking`は現在speak実行中の参加者=「考え中」表示用） |
 | GET `/api/options` | 応答 `{adapters:{<adapter名>:{models:string[], efforts:string[]}}}`。参加者設定UIの候補。サーバが実環境から自動発見（codex=`~/.codex/models_cache.json`、grok=`grok models`、ollama=`GET /api/tags`、openai-compat=`GET /v1/models`、claude=静的）し、結果を10分メモリキャッシュ。失敗したアダプタは静的フォールバックへ。**常に200** |
 | SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"turn-start","participantId","round"}`（speak開始=考え中）／`{"type":"speaking-progress","participantId","text"}`（話者の出力断片。サーバ側100msスロットル・揮発=stateには載せない）／`{"type":"synthesis-start","participantId"}`（結論まとめ中）／`{"type":"interject-start","participantId"}`（割り込み応答中）／`{"type":"auto-export","files":[...]}`（終了時自動保存の完了）／`{"type":"ended"}` |
-| POST `/api/start` | `{topic, maxRounds, rules?, inherit?}`（ONが2人未満なら400。`rules`は開始モーダルの追加ルール文字列・任意・最大4000字（超過400）・**commonへ追記結合**。`inherit`は`{cards?,notes?,rules?,summaryCard?}`のbool群＝**前回のended boardからの引き継ぎ**: cards=全カードを新ID採番でコピー、notes=コピー、rules=前回のcommon/byIdをステージングより優先、summaryCard=前回summaryを`📋 前回の結論（<前回お題>）`カードとしてdecidedへ（createdBy="inherit"）。前回boardが無ければ無視） |
+| POST `/api/start` | `{topic, maxRounds, rules?, inherit?}`（ONが2人未満なら400。`rules`は開始モーダルの追加ルール文字列・任意・最大4000字（超過400）・**commonへ追記結合**。`inherit`は`{cards?,notes?,rules?,summaryCard?}`のbool群＝**前回のended boardからの引き継ぎ**: cards=全カードを新ID採番でコピー、notes=コピー、rules=前回のcommon/byIdをステージングより優先、summaryCard=前回summaryを`📋 前回の結論（<前回お題>）`カードとしてdecidedへ（createdBy="inherit"）。`inherit.fromDebateId?`で任意の過去議論を引き継ぎ元に指定可（省略時は直近のended currentBoard・不明idは400）。前回boardが無ければ無視） |
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |
 | POST `/api/end` | `{}` |
 | POST `/api/extend` | `{rounds}`（整数1〜20以外400・議論なし400）。実行中: maxRounds加算＝続きのラウンドが走る。終了後: 加算→statusを進行状態へ戻しrunDebateを再起動（transcriptから履歴復元・続きのラウンドから。summaryは再終了時に上書き） |
@@ -152,6 +152,9 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 | POST `/api/say` | `{text}`（awaitingHuman時のみ有効） |
 | POST `/api/skip` | `{}`（同上） |
 | POST `/api/note` | `{text}`（human参加者自身のNOTE更新） |
+| GET `/api/debates` | 過去議論の一覧（新しい順=board.jsonのmtime降順）: `[{id, topic, status, endedBy, round, maxRounds, cardCount, updatedAt, hasSummary}]`。壊れたdirはスキップ（console警告のみ） |
+| GET `/api/debates/<id>` | 詳細: `{board（meta.rules/cards/notes/summary込み）, transcript（正規化済み）, participants（当時のsnapshot: model/effort/pcAccess込み）}`。不明id・トラバーサル的idは404（idはstate直下のディレクトリ名と完全一致のみ許可） |
+| POST `/api/load` | `{debateId}` — その議論をcurrentBoardへ復元。不明idは400、**AI発言中・進行中の議論があるときは409**。復元後は保存時status（通常ended）で待機＝割り込み・カード編集・「延長して再開」がそのまま効く。SSE update |
 | POST `/api/interject` | `{participantId, text}` — オーナーから特定AIへの**割り込み依頼**（text非空・最大4000字。human宛・不明pid・議論なしは400。AI発言中は**409**＝humanの入力待ち中は可）。実行中は一時pausedで通常ターンを止めて対象アダプタを1回呼び、transcriptへ `interject:"request"/"reply"` の2エントリ追記・cardOps/noteUpdate適用後にrunningへ復帰。**endedはendedのまま応答**（終了後も質問できる）。実行中は speaking が `phase:"interject"` になりライブ表示も流れる |
 
 - POST成功応答は最新の `/api/state` と同形を返す（クライアントは即時反映し、SSEは補助通知とする）

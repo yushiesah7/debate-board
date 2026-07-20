@@ -222,6 +222,25 @@
     50% { content: ".."; }
     75% { content: "..."; }
   }
+  /* 履歴モーダル */
+  .history-row {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 6px;
+    cursor: pointer;
+    background: var(--bg-card);
+  }
+  .history-row:hover { border-color: var(--accent); }
+  .history-row .h-topic { font-size: 13px; font-weight: 600; }
+  .history-row .h-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .h-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); }
+  .history-mini-lanes { display: flex; gap: 8px; margin: 8px 0; }
+  .history-mini-lane { flex: 1; background: var(--bg-lane); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 11px; min-width: 0; }
+  .history-mini-lane .lane-name { font-weight: 600; margin-bottom: 4px; }
+  .history-mini-lane ul { margin: 0; padding-left: 16px; }
+  .history-section-title { font-size: 12px; font-weight: 600; color: var(--accent); margin: 10px 0 4px; }
+
   #speaking-display {
     font-size: 12px;
     color: var(--accent);
@@ -460,6 +479,7 @@
   <div id="speaking-display" style="display:none;"></div>
   <div id="status-display" class="status-idle">停止中</div>
   <div id="header-actions">
+    <button id="btn-history" title="過去の議論の履歴">🗂 履歴</button>
     <button id="btn-rules" title="参加AIのルールを表示・編集">📜ルール</button>
     <button id="btn-start" class="primary">開始</button>
     <button id="btn-pause">一時停止</button>
@@ -544,7 +564,7 @@
     <textarea id="start-rules-input" maxlength="4000" placeholder="例: 編集はLab\repos\xxxのみ可／結論は3案まで" style="min-height:70px;"></textarea>
     <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">デフォルトルールは PARTICIPANT_RULES.md（常時適用・読み取り専用）。共通・個別ルールは📜から編集できます</div>
     <div id="start-inherit-section" style="display:none; margin-top:12px; border:1px dashed var(--border); border-radius:8px; padding:8px 10px;">
-      <div style="font-size:12px; font-weight:600; margin-bottom:4px;">📦 前回の議論から引き継ぐ（チェックしなければまっさらで開始）</div>
+      <div id="start-inherit-label" style="font-size:12px; font-weight:600; margin-bottom:4px;">📦 前回の議論から引き継ぐ（チェックしなければまっさらで開始）</div>
       <label style="display:inline-flex; align-items:center; gap:4px; margin:2px 10px 2px 0; font-size:12px; color:var(--text);"><input type="checkbox" id="inherit-cards" style="width:auto;">カード</label>
       <label style="display:inline-flex; align-items:center; gap:4px; margin:2px 10px 2px 0; font-size:12px; color:var(--text);"><input type="checkbox" id="inherit-notes" style="width:auto;">NOTE</label>
       <label style="display:inline-flex; align-items:center; gap:4px; margin:2px 10px 2px 0; font-size:12px; color:var(--text);"><input type="checkbox" id="inherit-rules" style="width:auto;">ルール</label>
@@ -554,6 +574,32 @@
     <div class="modal-actions">
       <button id="start-modal-cancel">キャンセル</button>
       <button id="start-modal-ok" class="primary">開始する</button>
+    </div>
+  </div>
+</div>
+
+<!-- 履歴モーダル（一覧⇄詳細） -->
+<div class="modal-overlay" id="history-modal">
+  <div class="modal-box" style="width:700px;">
+    <h3>🗂 議論の履歴</h3>
+
+    <div id="history-list-view">
+      <div id="history-list" style="max-height:60vh; overflow-y:auto;"></div>
+    </div>
+
+    <div id="history-detail-view" style="display:none;">
+      <button id="history-back" style="font-size:12px; margin-bottom:8px;">← 一覧へ戻る</button>
+      <div id="history-detail-body" style="max-height:52vh; overflow-y:auto;"></div>
+      <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:10px;">
+        <button id="history-load" class="primary" title="この議論を現在のボードに復元する">📂 読み込む</button>
+        <button id="history-inherit" title="この議論を引き継ぎ元にして新規開始">📦 これを引き継いで新規開始</button>
+        <button id="history-export-rules" title="この議論のルールをJSONでダウンロード">⬇ rules</button>
+        <button id="history-export-notes" title="この議論のNOTE/summary/カードをJSONでダウンロード">⬇ notes</button>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button id="history-close">閉じる</button>
     </div>
   </div>
 </div>
@@ -1640,18 +1686,34 @@
   // ------------------------------------------------------------------
   // 開始モーダル
   // ------------------------------------------------------------------
-  document.getElementById("btn-start").addEventListener("click", function () {
+  var inheritFromDebate = null; // 履歴から「これを引き継いで新規開始」した場合の {id, topic}
+
+  function openStartModal() {
     document.getElementById("start-topic-input").value = (state && state.board.meta.topic) || "";
     document.getElementById("start-rounds-input").value = 4;
     document.getElementById("start-rules-input").value = "";
     document.getElementById("start-error").textContent = "";
-    // 📦 引き継ぎセクション: 前回のended boardがある時のみ表示（既定は全OFF）
-    var hasPrev = !!(state && state.board.meta.status === "ended");
-    document.getElementById("start-inherit-section").style.display = hasPrev ? "" : "none";
+    // 📦 引き継ぎセクション: fromDebateId指定時は常時表示＋引き継ぎ元表記、
+    // 未指定時は前回のended boardがある時のみ表示（既定は全OFF=まっさら開始）
+    var section = document.getElementById("start-inherit-section");
+    var label = document.getElementById("start-inherit-label");
+    if (inheritFromDebate) {
+      section.style.display = "";
+      label.textContent = "📦 引き継ぎ元: " + inheritFromDebate.topic + "（チェックしなければまっさらで開始）";
+    } else {
+      var hasPrev = !!(state && state.board.meta.status === "ended");
+      section.style.display = hasPrev ? "" : "none";
+      label.textContent = "📦 前回の議論から引き継ぐ（チェックしなければまっさらで開始）";
+    }
     ["inherit-cards", "inherit-notes", "inherit-rules", "inherit-summary-card"].forEach(function (id) {
       document.getElementById(id).checked = false;
     });
     document.getElementById("start-modal").classList.add("show");
+  }
+
+  document.getElementById("btn-start").addEventListener("click", function () {
+    inheritFromDebate = null; // 通常の開始は直近のcurrentBoardが引き継ぎ元
+    openStartModal();
   });
   document.getElementById("start-modal-cancel").addEventListener("click", function () {
     document.getElementById("start-modal").classList.remove("show");
@@ -1686,6 +1748,7 @@
         summaryCard: document.getElementById("inherit-summary-card").checked
       };
       if (inherit.cards || inherit.notes || inherit.rules || inherit.summaryCard) {
+        if (inheritFromDebate) inherit.fromDebateId = inheritFromDebate.id;
         if (MOCK) {
           log("inherit指定（モックでは適用されません）", inherit);
         } else {
@@ -1693,8 +1756,267 @@
         }
       }
     }
+    inheritFromDebate = null; // 一度使ったらリセット
     apiPost("/api/start", startBody);
     document.getElementById("start-modal").classList.remove("show");
+  });
+
+  // ------------------------------------------------------------------
+  // 履歴モーダル（一覧⇄詳細）
+  // ------------------------------------------------------------------
+  var historyDetail = null; // 詳細ビュー表示中の {id, topic, data}
+
+  var MOCK_HISTORY_ITEMS = [
+    { id: "mock-1", topic: "きのこ vs たけのこ", status: "ended", endedBy: "maxRounds", round: 4, maxRounds: 4, cardCount: 6, updatedAt: new Date().toISOString(), hasSummary: true },
+    { id: "mock-2", topic: "つぶあん vs こしあん", status: "ended", endedBy: "allPass", round: 2, maxRounds: 4, cardCount: 3, updatedAt: new Date(Date.now() - 86400000).toISOString(), hasSummary: false }
+  ];
+
+  function showHistoryListView() {
+    historyDetail = null;
+    document.getElementById("history-list-view").style.display = "";
+    document.getElementById("history-detail-view").style.display = "none";
+  }
+
+  function endedByLabel(e) {
+    switch (e) {
+      case "maxRounds": return "規定R到達";
+      case "allPass": return "全員pass";
+      case "ending": return "手動終了";
+      case "noParticipants": return "参加者不足";
+      default: return e || "";
+    }
+  }
+
+  function renderHistoryList(items) {
+    var list = document.getElementById("history-list");
+    list.innerHTML = "";
+    if (!items || items.length === 0) {
+      var empty = document.createElement("div");
+      empty.style.cssText = "font-size:12px; color:var(--text-dim); padding:12px;";
+      empty.textContent = "まだ議論の履歴はありません。";
+      list.appendChild(empty);
+      return;
+    }
+    items.forEach(function (it) {
+      var row = document.createElement("div");
+      row.className = "history-row";
+      var topicEl = document.createElement("div");
+      topicEl.className = "h-topic";
+      topicEl.textContent = (it.hasSummary ? "📋 " : "") + (it.topic || "(お題なし)");
+      var metaEl = document.createElement("div");
+      metaEl.className = "h-meta";
+      var dateSpan = document.createElement("span");
+      dateSpan.textContent = String(it.updatedAt || "").replace("T", " ").slice(0, 16);
+      var rSpan = document.createElement("span");
+      rSpan.textContent = "R" + it.round + "/" + it.maxRounds;
+      var cSpan = document.createElement("span");
+      cSpan.textContent = "カード" + it.cardCount;
+      metaEl.appendChild(dateSpan);
+      metaEl.appendChild(rSpan);
+      metaEl.appendChild(cSpan);
+      if (it.endedBy) {
+        var badge = document.createElement("span");
+        badge.className = "h-badge";
+        badge.textContent = endedByLabel(it.endedBy);
+        metaEl.appendChild(badge);
+      }
+      row.appendChild(topicEl);
+      row.appendChild(metaEl);
+      row.addEventListener("click", function () {
+        if (MOCK) {
+          log("history detail", it.id);
+          showToast("モックモードでは詳細を表示できません");
+          return;
+        }
+        openHistoryDetail(it.id);
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function openHistoryModal() {
+    showHistoryListView();
+    document.getElementById("history-modal").classList.add("show");
+    if (MOCK) {
+      renderHistoryList(MOCK_HISTORY_ITEMS);
+      return;
+    }
+    document.getElementById("history-list").innerHTML = '<div style="font-size:12px; color:var(--text-dim); padding:12px;">読み込み中...</div>';
+    fetch("/api/debates").then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status + " /api/debates");
+      return res.json();
+    }).then(function (items) {
+      renderHistoryList(Array.isArray(items) ? items : []);
+    }).catch(function (err) {
+      console.error("history list failed:", err);
+      showToast("履歴の取得に失敗しました");
+      renderHistoryList([]);
+    });
+  }
+
+  function openHistoryDetail(id) {
+    fetch("/api/debates/" + encodeURIComponent(id)).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    }).then(function (data) {
+      historyDetail = { id: id, topic: (data.board.meta && data.board.meta.topic) || "", data: data };
+      renderHistoryDetail(data);
+      document.getElementById("history-list-view").style.display = "none";
+      document.getElementById("history-detail-view").style.display = "";
+    }).catch(function (err) {
+      console.error("history detail failed:", err);
+      showToast("詳細の取得に失敗しました");
+    });
+  }
+
+  function renderHistoryDetail(data) {
+    var body = document.getElementById("history-detail-body");
+    body.innerHTML = "";
+
+    var topicEl = document.createElement("div");
+    topicEl.style.cssText = "font-size:14px; font-weight:700;";
+    topicEl.textContent = (data.board.meta && data.board.meta.topic) || "(お題なし)";
+    body.appendChild(topicEl);
+
+    // 当時の参加者構成
+    var pTitle = document.createElement("div");
+    pTitle.className = "history-section-title";
+    pTitle.textContent = "参加者（当時の構成）";
+    body.appendChild(pTitle);
+    var pLine = document.createElement("div");
+    pLine.style.cssText = "font-size:12px; color:var(--text-dim);";
+    pLine.textContent = (data.participants || []).map(function (p) {
+      var bits = [p.name, p.adapter];
+      if (p.model) bits.push(p.model);
+      if (p.effort) bits.push(p.effort);
+      return bits.join("/");
+    }).join("、 ");
+    body.appendChild(pLine);
+
+    // かんばん3レーン（読み取り専用ミニ表示）
+    var kTitle = document.createElement("div");
+    kTitle.className = "history-section-title";
+    kTitle.textContent = "かんばん";
+    body.appendChild(kTitle);
+    var lanesWrap = document.createElement("div");
+    lanesWrap.className = "history-mini-lanes";
+    [["decided", "✅"], ["discussing", "💬"], ["held", "⏸"]].forEach(function (laneDef) {
+      var laneEl = document.createElement("div");
+      laneEl.className = "history-mini-lane";
+      var name = document.createElement("div");
+      name.className = "lane-name";
+      name.textContent = laneDef[1] + " " + laneDef[0];
+      laneEl.appendChild(name);
+      var ul = document.createElement("ul");
+      (data.board.cards || []).filter(function (c) { return c.lane === laneDef[0]; }).forEach(function (c) {
+        var li = document.createElement("li");
+        li.textContent = c.title || "(無題)";
+        li.title = c.body || "";
+        ul.appendChild(li);
+      });
+      laneEl.appendChild(ul);
+      lanesWrap.appendChild(laneEl);
+    });
+    body.appendChild(lanesWrap);
+
+    // 結論サマリ
+    if (typeof data.board.summary === "string" && data.board.summary) {
+      var sTitle = document.createElement("div");
+      sTitle.className = "history-section-title";
+      sTitle.textContent = "📋 結論サマリ";
+      sTitle.appendChild(makeCopyBtn(function () { return data.board.summary; }, "サマリをコピー"));
+      body.appendChild(sTitle);
+      var sBody = document.createElement("div");
+      sBody.style.cssText = "font-size:12px; white-space:pre-wrap; word-break:break-word; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px;";
+      sBody.textContent = data.board.summary;
+      body.appendChild(sBody);
+    }
+
+    // 発言ログ
+    var tTitle = document.createElement("div");
+    tTitle.className = "history-section-title";
+    tTitle.textContent = "発言ログ";
+    body.appendChild(tTitle);
+    (data.transcript || []).forEach(function (entry) {
+      var el = document.createElement("div");
+      el.className = "transcript-entry";
+      var head = document.createElement("div");
+      head.className = "transcript-head";
+      var nameSpan = document.createElement("span");
+      var headName = entry.speaker || "?";
+      if (entry.interject === "request") headName = "👤→" + (entry.targetId || "");
+      else if (entry.interject === "reply") headName = "↩ " + headName;
+      nameSpan.textContent = headName;
+      var roundSpan = document.createElement("span");
+      roundSpan.className = "transcript-round";
+      roundSpan.textContent = "R" + entry.round;
+      head.appendChild(nameSpan);
+      head.appendChild(makeCopyBtn(function () { return entry.text || ""; }, "発言をコピー"));
+      head.appendChild(roundSpan);
+      var bodyEl = document.createElement("div");
+      bodyEl.className = "transcript-body";
+      bodyEl.textContent = entry.text || "";
+      el.appendChild(head);
+      el.appendChild(bodyEl);
+      body.appendChild(el);
+    });
+  }
+
+  document.getElementById("btn-history").addEventListener("click", openHistoryModal);
+  document.getElementById("history-back").addEventListener("click", function () {
+    showHistoryListView();
+    if (!MOCK) openHistoryModal();
+  });
+  document.getElementById("history-close").addEventListener("click", function () {
+    document.getElementById("history-modal").classList.remove("show");
+  });
+  document.getElementById("history-modal").addEventListener("click", function (e) {
+    if (e.target.id === "history-modal") document.getElementById("history-modal").classList.remove("show");
+  });
+
+  document.getElementById("history-load").addEventListener("click", function () {
+    if (!historyDetail) return;
+    if (MOCK) {
+      log("POST", "/api/load", { debateId: historyDetail.id });
+      showToast("モックモードでは読み込みできません");
+      return;
+    }
+    apiPost("/api/load", { debateId: historyDetail.id }).then(function (r) {
+      if (r && r.ok) {
+        showToast("読み込みました。割り込みや延長して再開ができます");
+        document.getElementById("history-modal").classList.remove("show");
+      }
+    });
+  });
+
+  document.getElementById("history-inherit").addEventListener("click", function () {
+    if (!historyDetail) return;
+    inheritFromDebate = { id: historyDetail.id, topic: historyDetail.topic };
+    document.getElementById("history-modal").classList.remove("show");
+    openStartModal();
+  });
+
+  document.getElementById("history-export-rules").addEventListener("click", function () {
+    if (!historyDetail) return;
+    var r = (historyDetail.data.board.meta && historyDetail.data.board.meta.rules) || {};
+    downloadJson(timestampName("rules"), {
+      type: "debate-board-rules",
+      version: 1,
+      common: typeof r.common === "string" ? r.common : "",
+      participants: (r.byId && typeof r.byId === "object") ? r.byId : {}
+    });
+  });
+
+  document.getElementById("history-export-notes").addEventListener("click", function () {
+    if (!historyDetail) return;
+    var b = historyDetail.data.board;
+    downloadJson(timestampName("notes"), {
+      type: "debate-board-notes",
+      version: 1,
+      notes: b.notes || {},
+      summary: b.summary,
+      cards: (b.cards || []).map(function (c) { return { lane: c.lane, title: c.title, body: c.body }; })
+    });
   });
 
   // ------------------------------------------------------------------

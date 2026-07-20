@@ -21,7 +21,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { loadConfig } from './config.mjs';
-import { createDebate, saveBoard, applyCardOps, loadTranscript, appendTranscript, normalizeRules } from './state.mjs';
+import { createDebate, loadDebate, listDebates, saveBoard, applyCardOps, loadTranscript, appendTranscript, normalizeRules } from './state.mjs';
 import { buildInterjectPrompt, composeRulesFor, boardSummary, TURN_SCHEMA } from './prompt.mjs';
 import { runDebate } from './engine.mjs';
 import { resolveAdapter } from './adapters/index.mjs';
@@ -526,10 +526,13 @@ export function createServer({
    * @param {string} [extraRules] - 開始モーダルの追加ルール（commonへ追記結合される）
    * @param {{cards?:boolean, notes?:boolean, rules?:boolean, summaryCard?:boolean}|null} [inherit]
    *   - 前回の議論（ended状態のcurrentBoard）からの引き継ぎ指定。前回boardが無ければ無視
+   * @param {object|null} [inheritSourceBoard]
+   *   - inherit.fromDebateId指定時の引き継ぎ元board（state/から読込済み）。省略時は直近のended currentBoard
    */
-  function startDebate(topic, maxRounds, extraRules, inherit) {
-    // 引き継ぎ元: endedなboardがあるときだけ有効
-    const prev = currentBoard && currentBoard.meta.status === 'ended' ? currentBoard : null;
+  function startDebate(topic, maxRounds, extraRules, inherit, inheritSourceBoard) {
+    // 引き継ぎ元: fromDebateId指定があればそのboard、無ければended状態のcurrentBoard
+    const prev =
+      inheritSourceBoard ?? (currentBoard && currentBoard.meta.status === 'ended' ? currentBoard : null);
     const inheritOpts = prev && inherit && typeof inherit === 'object' ? inherit : null;
 
     // ルール3層を構成: defaultSnapshotはstart時に毎回ファイルから読んで固定保存。
@@ -644,11 +647,22 @@ export function createServer({
       '/api/session-rules': handleSessionRules,
       '/api/import-notes': handleImportNotes,
       '/api/interject': handleInterject,
+      '/api/load': handleLoad,
       '/api/card': handleCard,
       '/api/say': handleSay,
       '/api/skip': handleSkip,
       '/api/note': handleNote,
     };
+
+    if (pathname === '/api/debates') {
+      if (req.method !== 'GET') return sendError(res, 405, 'method not allowed');
+      return sendJson(res, 200, listDebates(stateDir));
+    }
+    if (pathname.startsWith('/api/debates/')) {
+      if (req.method !== 'GET') return sendError(res, 405, 'method not allowed');
+      const id = decodeURIComponent(pathname.slice('/api/debates/'.length));
+      return serveDebateDetail(id, res);
+    }
 
     if (Object.prototype.hasOwnProperty.call(postRoutes, pathname)) {
       if (req.method !== 'POST') return sendError(res, 405, 'method not allowed');
@@ -662,6 +676,108 @@ export function createServer({
     }
 
     return sendError(res, 404, 'not found');
+  }
+
+  /**
+   * debateIdが state/ 直下の実在ディレクトリ名と**完全一致**するか検証する
+   * （パストラバーサル対策: パス結合前にディレクトリ一覧との一致のみ許可）。
+   * @param {unknown} id
+   * @returns {boolean}
+   */
+  function isValidDebateId(id) {
+    if (typeof id !== 'string' || id === '') return false;
+    let entries;
+    try {
+      entries = fs.readdirSync(stateDir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    return entries.some((e) => e.isDirectory() && e.name === id);
+  }
+
+  /**
+   * 指定boardのtranscriptを /api/state と同じ正規化形にする
+   * （utterance→text・speaker名解決・interjectパススルー）。
+   * @param {object} board
+   */
+  function transcriptViewFor(board) {
+    const { entries } = loadTranscript(stateDir, board.meta.id);
+    return entries.map((e) => {
+      const speaker = board.participants.find((p) => p.id === e.participantId);
+      return {
+        round: e.round,
+        speaker: speaker ? speaker.name : e.participantId,
+        text: typeof e.utterance === 'string' ? e.utterance : '',
+        ts: e.timestamp ?? null,
+        ...(e.interject ? { interject: e.interject, targetId: e.targetId ?? null } : {}),
+      };
+    });
+  }
+
+  /**
+   * GET /api/debates/<id> — 過去議論の詳細（board全体＋正規化transcript＋当時の参加者snapshot）。
+   * 不明id・トラバーサル的なidは404。
+   * @param {string} id
+   * @param {import('node:http').ServerResponse} res
+   */
+  function serveDebateDetail(id, res) {
+    if (!isValidDebateId(id)) return sendError(res, 404, 'unknown debate id');
+    let board;
+    try {
+      board = loadDebate(stateDir, id);
+    } catch (err) {
+      return sendError(res, 404, `failed to load debate: ${err?.message ?? err}`);
+    }
+    return sendJson(res, 200, {
+      board: {
+        meta: board.meta, // rules（3層）込みの当時のメタ
+        cards: board.cards,
+        notes: board.notes,
+        summary: board.summary,
+      },
+      transcript: transcriptViewFor(board),
+      participants: (board.participants ?? []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        adapter: p.adapter,
+        enabled: p.enabled,
+        model: p.model ?? null,
+        effort: p.effort ?? null,
+        pcAccess: p.pcAccess ?? null,
+      })),
+    });
+  }
+
+  /**
+   * POST /api/load — 過去の議論をcurrentBoardへ復元する。
+   * - AIが発言中（speaking≠null）や進行中の議論があるときは409
+   * - 復元後は保存時status（通常ended）のまま待機＝割り込み・カード編集・
+   *   「延長して再開」（POST /api/extend）がそのまま効く
+   * - participantsビューは復元board側のスナップショットが正になる（currentParticipantsViewの既存挙動）
+   * @param {object} body
+   * @param {import('node:http').ServerResponse} res
+   */
+  function handleLoad(body, res) {
+    if (!isValidDebateId(body.debateId)) {
+      return sendError(res, 400, 'debateId (existing debate id) is required');
+    }
+    if (speaking) {
+      return sendError(res, 409, '発言が終わってから読み込んでください');
+    }
+    if (currentBoard && currentBoard.meta.status !== 'ended') {
+      return sendError(res, 409, 'a debate is in progress; end it before loading another');
+    }
+    let board;
+    try {
+      board = loadDebate(stateDir, body.debateId);
+    } catch (err) {
+      return sendError(res, 400, `failed to load debate: ${err?.message ?? err}`);
+    }
+    currentBoard = board;
+    awaitingHuman = null;
+    speaking = null;
+    broadcast({ type: 'update' });
+    return sendJson(res, 200, buildStateResponse());
   }
 
   /**
@@ -771,6 +887,7 @@ export function createServer({
       return sendError(res, 400, 'at least 2 enabled participants are required to start');
     }
     let inherit = null;
+    let inheritSourceBoard = null;
     if (body.inherit !== undefined && body.inherit !== null) {
       if (typeof body.inherit !== 'object' || Array.isArray(body.inherit)) {
         return sendError(res, 400, 'inherit must be an object when specified');
@@ -781,8 +898,19 @@ export function createServer({
         rules: !!body.inherit.rules,
         summaryCard: !!body.inherit.summaryCard,
       };
+      // fromDebateId: 指定時はそのstateを引き継ぎ元にする（省略時は直近のended currentBoard）
+      if (body.inherit.fromDebateId !== undefined && body.inherit.fromDebateId !== null) {
+        if (!isValidDebateId(body.inherit.fromDebateId)) {
+          return sendError(res, 400, `unknown inherit.fromDebateId "${body.inherit.fromDebateId}"`);
+        }
+        try {
+          inheritSourceBoard = loadDebate(stateDir, body.inherit.fromDebateId);
+        } catch (err) {
+          return sendError(res, 400, `failed to load inherit source: ${err?.message ?? err}`);
+        }
+      }
     }
-    startDebate(body.topic, maxRounds, extraRules, inherit);
+    startDebate(body.topic, maxRounds, extraRules, inherit, inheritSourceBoard);
     return sendJson(res, 200, buildStateResponse());
   }
 

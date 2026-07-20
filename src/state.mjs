@@ -138,6 +138,50 @@ export function loadDebate(stateDir, debateId) {
 }
 
 /**
+ * state/ 配下の全議論のサマリ一覧を新しい順（board.jsonのmtime降順）で返す。
+ * 壊れたディレクトリ（board.json欠落・JSON不正等）はスキップし console.warn のみ。
+ * stateDir自体が無ければ空配列。
+ *
+ * @param {string} stateDir
+ * @returns {Array<{id:string, topic:string, status:string, endedBy:string|null, round:number, maxRounds:number, cardCount:number, updatedAt:string, hasSummary:boolean}>}
+ */
+export function listDebates(stateDir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(stateDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const items = [];
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    const boardPath = path.join(stateDir, ent.name, 'board.json');
+    try {
+      const stat = fs.statSync(boardPath);
+      const board = JSON.parse(fs.readFileSync(boardPath, 'utf8'));
+      if (!board?.meta) throw new Error('board.json has no meta');
+      items.push({
+        id: ent.name,
+        topic: board.meta.topic ?? '',
+        status: board.meta.status ?? 'unknown',
+        endedBy: board.meta.endedBy ?? null,
+        round: board.meta.round ?? 0,
+        maxRounds: board.meta.maxRounds ?? 0,
+        cardCount: Array.isArray(board.cards) ? board.cards.length : 0,
+        updatedAt: stat.mtime.toISOString(),
+        hasSummary: typeof board.summary === 'string' && board.summary.length > 0,
+        _mtimeMs: stat.mtimeMs,
+      });
+    } catch (err) {
+      console.warn(`listDebates: skipping broken dir "${ent.name}": ${err?.message ?? err}`);
+    }
+  }
+  items.sort((a, b) => b._mtimeMs - a._mtimeMs);
+  for (const it of items) delete it._mtimeMs;
+  return items;
+}
+
+/**
  * board を board.json に保存する（updatedAt を更新）。
  * 書き込みは原子的: 同ディレクトリの一時ファイルに書いてから renameSync で置き換える。
  * 途中でクラッシュしても board.json が中途半端な内容になることはない。
