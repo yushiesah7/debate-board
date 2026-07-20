@@ -1,5 +1,20 @@
 # debate-board PROGRESS
 
+## 2026-07-20 (3) 実戦フィードバック反映ラッシュ（記録者: 凪）
+
+- 何を変えたか（yushiさんの実利用フィードバックを逐次実装。全てレビュー体制はSonnet実装+司令塔検証）:
+  - 発言中インジケータ（チップパルス・考え中行・ヘッダ表示・speaking state）
+  - 発言ライブストリーミング（claude=stream-json/grok=streaming-json/codex=JSONL進捗、SSE speaking-progress、GUIライブボックス。実CLIストリーム形式はJSDoc記載）
+  - カード保存UX（開始前ロック・warnings可視化・終了後の情報トースト）
+  - ラウンド延長 /api/extend（実行中加算・終了後は続きから再開しsummary再生成）
+  - 📋ワンクリックコピー（発言・カード・サマリ・NOTE）
+  - 前回議論の引き継ぎ /api/start inherit（カード/NOTE/ルール/結論カード化・チェック式）
+  - 終了時自動エクスポート（autoExportDir既定exports/・git外・CIガード追加）
+  - 割り込み依頼 /api/interject（いつでも特定AIへ個人依頼。実行中はpause割り込み、終了後もended待機で応答。👤→/↩バッジ表示）
+- 意図的に触らなかったもの: interjectのラウンド番号表記（バッジで区別可・実害なし）、grok進捗のthought混在（絞りは1行変更で可）
+- 完了・未完了: 全て完了・push済み（main c537428）。テスト185件全緑
+- 次に確認すべきこと: yushiさんの再起動後の実戦使用感。M3残: 履歴閲覧・summaryのMarkdownエクスポート・resume最適化
+
 ## 2026-07-20 (2) pcAccess・model/effort・参加者設定GUI（記録者: 凪)
 
 - 何を変えたか:
