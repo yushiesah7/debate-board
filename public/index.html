@@ -361,6 +361,10 @@
   }
   .transcript-entry:hover .copy-btn { opacity: 0.8; }
   .copy-btn:hover { opacity: 1 !important; }
+  /* かんばんカード表面の📋（右上・ホバーで表示） */
+  .card { position: relative; }
+  .card > .copy-btn { position: absolute; top: 4px; right: 6px; }
+  .card:hover > .copy-btn { opacity: 0.8; }
   .transcript-body { font-size: 13px; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 
   #note-area {
@@ -1211,6 +1215,14 @@
     el.querySelector(".card-title").textContent = card.title || "(無題)";
     el.querySelector(".card-body").textContent = card.body || "";
     el.querySelector(".card-meta").textContent = card.createdBy ? ("by " + card.createdBy) : "";
+
+    // ホバーで出る📋コピー（title+改行+body）。makeCopyBtnはstopPropagation済みなので
+    // クリック編集モーダルは開かない。draggable=falseでドラッグ開始とも干渉しない
+    var copyBtn = makeCopyBtn(function () {
+      return (card.title || "") + "\n" + (card.body || "");
+    }, "カードをコピー");
+    copyBtn.setAttribute("draggable", "false");
+    el.appendChild(copyBtn);
 
     el.addEventListener("dragstart", function (e) {
       draggedCardId = card.id;
