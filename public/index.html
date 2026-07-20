@@ -174,6 +174,43 @@
   .chip.on .dot { background: var(--green); }
   .chip .adapter-tag { font-size: 10px; color: var(--text-dim); }
   .chip .config-tag { font-size: 10px; color: var(--accent); }
+  /* speak実行中（考え中）のチップ: box-shadowのパルスアニメ */
+  .chip.speaking {
+    border-color: var(--accent);
+    animation: chip-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes chip-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(110,168,255,0.55); }
+    50% { box-shadow: 0 0 0 7px rgba(110,168,255,0); }
+  }
+  /* 発言ログ末尾の「考え中」一時行 */
+  .thinking-entry {
+    background: rgba(110,168,255,0.08);
+    border: 1px dashed var(--accent-dim);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .thinking-dots::after {
+    display: inline-block;
+    content: "";
+    width: 1.2em;
+    text-align: left;
+    animation: thinking-dots 1.5s steps(1, end) infinite;
+  }
+  @keyframes thinking-dots {
+    0% { content: ""; }
+    25% { content: "."; }
+    50% { content: ".."; }
+    75% { content: "..."; }
+  }
+  #speaking-display {
+    font-size: 12px;
+    color: var(--accent);
+    white-space: nowrap;
+  }
 
   .chip-wrap { display: inline-flex; align-items: center; gap: 2px; }
   .chip-gear {
@@ -388,6 +425,7 @@
   <h1>debate-board</h1>
   <div id="topic-display">お題未設定</div>
   <div id="round-display">ラウンド -</div>
+  <div id="speaking-display" style="display:none;"></div>
   <div id="status-display" class="status-idle">停止中</div>
   <div id="header-actions">
     <button id="btn-rules" title="参加AIのルールを表示・編集">📜ルール</button>
@@ -652,6 +690,21 @@
 
   var endedCardNoticeShown = false; // ended後のカード操作の情報トーストは一度だけ
 
+  // 現在speak実行中の参加者（サーバの speaking フィールド）。
+  // humanのターンは既存の入力バーが出るので「考え中」表示はしない（二重表示防止）。
+  function getSpeaking() {
+    var sp = state && state.speaking;
+    if (!sp || !sp.participantId) return null;
+    var awaiting = state.awaitingHuman;
+    if (awaiting && awaiting.participantId === sp.participantId) return null;
+    return sp;
+  }
+
+  function participantName(pid) {
+    var p = (state && state.participants || []).find(function (x) { return x.id === pid; });
+    return p ? p.name : pid;
+  }
+
   function maybeNotifyEndedCardEdit() {
     if (MOCK) return;
     var status = state && state.board.meta && state.board.meta.status;
@@ -874,6 +927,16 @@
 
     // 新しい議論が動き出したらended用の情報トーストフラグをリセット
     if (meta.status === "running") endedCardNoticeShown = false;
+
+    // ヘッダの「発言中: <名前>」表示（speaking時のみ）
+    var speakingEl = document.getElementById("speaking-display");
+    var sp = getSpeaking();
+    if (sp) {
+      speakingEl.textContent = (sp.phase === "synthesis" ? "まとめ中: " : "発言中: ") + participantName(sp.participantId);
+      speakingEl.style.display = "";
+    } else {
+      speakingEl.style.display = "none";
+    }
     // idleロック中は「+カード追加」を無効化見た目に
     var locked = cardsLocked();
     document.querySelectorAll(".add-card-btn").forEach(function (btn) {
@@ -929,7 +992,9 @@
 
       var chip = document.createElement("button");
       chip.type = "button";
-      chip.className = "chip " + (p.enabled ? "on" : "off");
+      var spNow = getSpeaking();
+      chip.className = "chip " + (p.enabled ? "on" : "off") +
+        (spNow && spNow.participantId === p.id ? " speaking" : "");
       chip.setAttribute("aria-pressed", p.enabled ? "true" : "false");
       var configLabel = configTagLabel(p);
       chip.innerHTML =
@@ -1040,7 +1105,8 @@
     content.innerHTML = "";
     if (activeSideTab === "transcript") {
       var list = state.transcript || [];
-      if (list.length === 0) {
+      var sp = getSpeaking();
+      if (list.length === 0 && !sp) {
         var empty = document.createElement("div");
         empty.id = "empty-hint";
         empty.textContent = "まだ発言はありません。";
@@ -1053,12 +1119,28 @@
         el.innerHTML =
           '<div class="transcript-head"><span></span><span class="transcript-round"></span></div>' +
           '<div class="transcript-body"></div>';
-        el.querySelector(".transcript-head span").textContent = entry.name || entry.participantId || "?";
+        el.querySelector(".transcript-head span").textContent = entry.name || entry.speaker || entry.participantId || "?";
         el.querySelector(".transcript-round").textContent = "R" + entry.round;
         el.querySelector(".transcript-body").textContent =
           entry.text != null ? entry.text : (entry.utterance || "");
         content.appendChild(el);
       });
+      // 発言ログ末尾の一時行「考え中」（turn/updateで実発言に置き換わったら消える）
+      if (sp) {
+        var thinking = document.createElement("div");
+        thinking.className = "thinking-entry";
+        var label = document.createElement("span");
+        if (sp.phase === "synthesis") {
+          label.textContent = "📋 " + participantName(sp.participantId) + " が結論をまとめ中";
+        } else {
+          label.textContent = "🤔 " + participantName(sp.participantId) + " が考え中";
+        }
+        var dots = document.createElement("span");
+        dots.className = "thinking-dots";
+        thinking.appendChild(label);
+        thinking.appendChild(dots);
+        content.appendChild(thinking);
+      }
       content.scrollTop = content.scrollHeight;
     } else {
       // NOTEタブ（activeSideTab = participantId）
@@ -1660,6 +1742,16 @@
         } else if (msg.type === "await-human") {
           if (state) {
             state.awaitingHuman = { participantId: msg.participantId };
+            render();
+          }
+        } else if (msg.type === "turn-start") {
+          if (state) {
+            state.speaking = { participantId: msg.participantId, round: msg.round, phase: "turn" };
+            render();
+          }
+        } else if (msg.type === "synthesis-start") {
+          if (state) {
+            state.speaking = { participantId: msg.participantId, round: null, phase: "synthesis" };
             render();
           }
         } else if (msg.type === "ended") {

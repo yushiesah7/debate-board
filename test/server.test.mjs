@@ -1002,6 +1002,75 @@ test('POST /api/card: 不正opは200＋warnings付き応答（黙って捨てな
   assert.ok(ok.body.board.cards.some((c) => c.title === '正常カード'));
 });
 
+// --------------------------------------------------------------------
+// speaking（発言中インジケータ）
+// --------------------------------------------------------------------
+
+test('/api/state の speaking がターン中に設定され、ended後は null になる', async (t) => {
+  const stateDir = makeStateDir();
+  // human無しの2AI構成。aのspeakに遅延を入れて「考え中」の途中stateを覗く
+  const config = {
+    port: 0,
+    maxRounds: 1,
+    participants: [
+      { id: 'a', name: 'A', adapter: 'claude', enabled: true },
+      { id: 'b', name: 'B', adapter: 'codex', enabled: true },
+    ],
+  };
+  const slowSpeaker = (label, delayMs) => ({
+    async speak(ctx) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      return { utterance: `${label}発言`, cardOps: [], noteUpdate: null, pass: true, error: null };
+    },
+  });
+  const server = createServer({
+    config,
+    adapters: { a: slowSpeaker('A', 300), b: slowSpeaker('B', 50) },
+    stateDir,
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const sseReqs = [];
+  t.after(
+    () =>
+      new Promise((resolve) => {
+        for (const req of sseReqs) {
+          try {
+            req.destroy();
+          } catch {
+            /* already closed */
+          }
+        }
+        server.close(() => resolve());
+      })
+  );
+  const sse = connectSSE(`${baseUrl}/api/events`, sseReqs);
+
+  // 開始前はnull
+  const idle = await getJson(`${baseUrl}/api/state`);
+  assert.equal(idle.body.speaking, null);
+
+  await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 1 });
+
+  // aのspeak中（300ms遅延）に覗く: SSEでturn-startが届いてから/api/stateを取得
+  await waitFor(() => sse.events.some((e) => e.type === 'turn-start' && e.participantId === 'a'));
+  const during = await getJson(`${baseUrl}/api/state`);
+  assert.ok(during.body.speaking, 'ターン中はspeakingが設定されていること');
+  assert.equal(during.body.speaking.participantId, 'a');
+  assert.equal(during.body.speaking.phase, 'turn');
+  assert.equal(during.body.speaking.round, 1);
+  assert.equal(typeof during.body.speaking.since, 'string');
+
+  // シンセシス開始イベントも流れる
+  await waitFor(() => sse.events.some((e) => e.type === 'synthesis-start'));
+
+  // 終了後はnull
+  await waitFor(() => sse.events.some((e) => e.type === 'ended'));
+  const after = await getJson(`${baseUrl}/api/state`);
+  assert.equal(after.body.board.meta.status, 'ended');
+  assert.equal(after.body.speaking, null);
+});
+
 test('サーバは静的にpublic/index.htmlを配信する', async (t) => {
   const { baseUrl } = await startTestServer(t);
   const res = await fetch(`${baseUrl}/`);

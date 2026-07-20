@@ -171,6 +171,9 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
       ctx.prompt = ctx.promptText;
 
       const adapter = adapters?.[participant.id];
+      // speak呼び出し直前に「考え中」の合図を出す（GUIの発言中インジケータ用。
+      // 完了時の 'turn' イベントと対になる）
+      emit({ type: 'turn-start', round, participantId: participant.id });
       let result;
       try {
         result = adapter ? await adapter.speak(ctx) : { pass: true, error: 'no adapter registered' };
@@ -267,6 +270,8 @@ async function runSynthesis({ stateDir, board, history, adapters, emit }) {
     };
     ctx.prompt = ctx.promptText;
     ctx.schemaJson = TURN_SCHEMA;
+    // シンセシス開始の合図（GUIの「結論をまとめ中」表示用）
+    emit({ type: 'synthesis-start', participantId: synthesisParticipant.id });
     try {
       const result = await adapters[synthesisParticipant.id].speak(ctx);
       if (result && typeof result === 'object') {

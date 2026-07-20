@@ -178,6 +178,12 @@ export function createServer({
    * @type {{common: string, byId: Object<string, string>}}
    */
   const sessionRules = { common: '', byId: {} };
+  /**
+   * 現在speak実行中の参加者（GUIの「考え中」インジケータ用）。
+   * turn-startで設定、turn完了・endedで解除。シンセシス中は phase:'synthesis'（round:null）。
+   * @type {null | {participantId: string, round: number|null, phase: 'turn'|'synthesis', since: string}}
+   */
+  let speaking = null;
 
   /** @param {{type:string, [k:string]:any}} event */
   function broadcast(event) {
@@ -316,6 +322,7 @@ export function createServer({
         },
         participants: currentParticipantsView(),
         awaitingHuman,
+        speaking,
         transcript: [],
       };
     }
@@ -335,6 +342,7 @@ export function createServer({
       },
       participants: currentParticipantsView(),
       awaitingHuman,
+      speaking,
       transcript: currentTranscriptView(),
     };
   }
@@ -347,14 +355,40 @@ export function createServer({
 
   /** @param {{type:string, [k:string]:any}} event */
   function onEngineEvent(event) {
+    if (event.type === 'turn-start') {
+      speaking = {
+        participantId: event.participantId,
+        round: event.round,
+        phase: 'turn',
+        since: new Date().toISOString(),
+      };
+      broadcast({ type: 'turn-start', participantId: event.participantId, round: event.round });
+      return;
+    }
+    if (event.type === 'synthesis-start') {
+      speaking = {
+        participantId: event.participantId,
+        round: null,
+        phase: 'synthesis',
+        since: new Date().toISOString(),
+      };
+      broadcast({ type: 'synthesis-start', participantId: event.participantId });
+      return;
+    }
+    if (event.type === 'turn') {
+      speaking = null; // 発言完了（実発言はupdate経由の/api/state再取得で反映される）
+      broadcast({ type: 'update' });
+      return;
+    }
     if (event.type === 'ended') {
+      speaking = null; // シンセシス完了含む
       // 'update'も併せて流す: GUI側の既存ハンドラ（update時に/api/state再取得）だけでも
       // summaryが反映されるようにするための保険（'ended'固有ハンドラが無くても壊れない）
       broadcast({ type: 'update' });
       broadcast({ type: 'ended' });
       return;
     }
-    // 'turn' / 'warning' いずれも「boardが変わったので再取得してね」の合図
+    // 'warning' 等も「boardが変わったので再取得してね」の合図
     broadcast({ type: 'update' });
   }
 
@@ -375,6 +409,7 @@ export function createServer({
       common,
       byId: { ...sessionRules.byId },
     };
+    speaking = null; // 前の議論の残留インジケータをクリア
     const board = createDebate(stateDir, topic, { maxRounds, rules, participants });
     currentBoard = board;
 
