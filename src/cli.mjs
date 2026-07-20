@@ -20,7 +20,7 @@ import { loadConfig } from './config.mjs';
 import { createDebate } from './state.mjs';
 import { runDebate } from './engine.mjs';
 import { resolveAdapter } from './adapters/index.mjs';
-import { composeRules } from './server.mjs';
+import { readDefaultRules } from './server.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,8 +61,12 @@ export async function main(argv) {
     return;
   }
 
-  // 基本ルール（PARTICIPANT_RULES.md。無ければ空）＋今回の追加ルールを合成して注入する
-  const rules = composeRules(path.join(rootDir, 'PARTICIPANT_RULES.md'), extraRules);
+  // ルール3層: デフォルト（PARTICIPANT_RULES.md。無ければ空）＋第3引数の追加ルール（common）
+  const rules = {
+    defaultSnapshot: readDefaultRules(path.join(rootDir, 'PARTICIPANT_RULES.md')),
+    common: extraRules.trim(),
+    byId: {},
+  };
   const board = createDebate(stateDir, topic, { maxRounds, rules, participants });
 
   /** @type {Object<string, {speak: (ctx: object) => Promise<object>}>} */

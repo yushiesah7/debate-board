@@ -11,7 +11,7 @@ import os from 'node:os';
 
 import { createDebate, loadDebate, saveBoard, appendTranscript, loadTranscript, applyCardOps } from '../src/state.mjs';
 import { runDebate } from '../src/engine.mjs';
-import { TURN_SCHEMA, buildTurnPrompt, buildSynthesisPrompt } from '../src/prompt.mjs';
+import { TURN_SCHEMA, buildTurnPrompt, buildSynthesisPrompt, composeRulesFor } from '../src/prompt.mjs';
 
 const TOPIC = 'きのこ vs たけのこ';
 
@@ -554,44 +554,100 @@ test('buildSynthesisPrompt: rules有り/無しのセクション挿入', () => {
   assert.ok(!without.includes('--- ルール（厳守） ---'));
 });
 
-test('createDebate: meta.rulesが保存されresume（loadDebate）後も保持される', () => {
-  const stateDir = makeStateDir();
-  const board = createDebate(stateDir, TOPIC, baseConfig({ rules: 'ダミールール全文' }));
-  assert.equal(board.meta.rules, 'ダミールール全文');
-  const reloaded = loadDebate(stateDir, board.meta.id);
-  assert.equal(reloaded.meta.rules, 'ダミールール全文');
+test('composeRulesFor: default→共通→個別の順で非空だけ結合し、全部空なら""', () => {
+  const rules = {
+    defaultSnapshot: 'ダミーデフォルト',
+    common: 'ダミー共通',
+    byId: { a: 'Aのダミー個別', b: 'Bのダミー個別' },
+  };
+  const forA = composeRulesFor(rules, 'a');
+  assert.equal(
+    forA,
+    'ダミーデフォルト\n\n## この議論の共通ルール\nダミー共通\n\n## あなたの個別ルール\nAのダミー個別'
+  );
+  // 他人の個別ルールは入らない
+  assert.ok(!forA.includes('Bのダミー個別'));
 
-  // rules未指定なら "" になる
-  const board2 = createDebate(stateDir, TOPIC, baseConfig());
-  assert.equal(board2.meta.rules, '');
+  // participantId無し（シンセシス）は default+common のみ
+  const forSynthesis = composeRulesFor(rules, null);
+  assert.equal(forSynthesis, 'ダミーデフォルト\n\n## この議論の共通ルール\nダミー共通');
+
+  // 空要素はセクションごと省略
+  assert.equal(composeRulesFor({ defaultSnapshot: '', common: 'だけ共通', byId: {} }, 'a'), '## この議論の共通ルール\nだけ共通');
+  assert.equal(composeRulesFor({ defaultSnapshot: '', common: '', byId: {} }, 'a'), '');
+  assert.equal(composeRulesFor(null, 'a'), '');
+  // 後方互換: string渡しはそのまま
+  assert.equal(composeRulesFor('旧形式ダミー', 'a'), '旧形式ダミー');
 });
 
-test('engine: board.meta.rulesがctx.rulesとpromptTextの両方でアダプタへ届く（シンセシス含む）', async () => {
+test('createDebate: meta.rulesが3層形式で保存されresume（loadDebate）後も保持される', () => {
   const stateDir = makeStateDir();
-  const board = createDebate(stateDir, TOPIC, baseConfig({ maxRounds: 1, rules: 'ダミールール注入テスト' }));
+  const rules = { defaultSnapshot: 'デフォD', common: '共通C', byId: { a: '個別A' } };
+  const board = createDebate(stateDir, TOPIC, baseConfig({ rules }));
+  assert.deepEqual(board.meta.rules, rules);
+  const reloaded = loadDebate(stateDir, board.meta.id);
+  assert.deepEqual(reloaded.meta.rules, rules);
 
-  const seen = { turnCtxRules: null, turnPromptHasRules: false, synthPromptHasRules: false };
+  // rules未指定なら全て空
+  const board2 = createDebate(stateDir, TOPIC, baseConfig());
+  assert.deepEqual(board2.meta.rules, { defaultSnapshot: '', common: '', byId: {} });
+});
+
+test('loadDebate: 旧string形式のrulesは{defaultSnapshot:"",common:旧,byId:{}}へ変換される（後方互換）', () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig());
+  // 旧形式のboard.jsonを直接作って読み直す
+  board.meta.rules = '旧形式のダミールール文字列';
+  saveBoard(stateDir, board);
+  const reloaded = loadDebate(stateDir, board.meta.id);
+  assert.deepEqual(reloaded.meta.rules, {
+    defaultSnapshot: '',
+    common: '旧形式のダミールール文字列',
+    byId: {},
+  });
+});
+
+test('engine: 3層rulesが参加者ごとに合成されctx.rules/promptTextへ届く（シンセシスはdefault+commonのみ）', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({
+    maxRounds: 1,
+    rules: { defaultSnapshot: 'デフォ注入D', common: '共通注入C', byId: { a: 'A個別注入' } },
+  }));
+
+  const seen = { aCtxRules: null, aPromptOk: false, bHasAOwn: null, synthPrompt: null };
   const adapters = {
     a: {
       async speak(ctx) {
         if (ctx.round !== undefined) {
-          seen.turnCtxRules = ctx.rules;
-          seen.turnPromptHasRules =
+          seen.aCtxRules = ctx.rules;
+          seen.aPromptOk =
             ctx.promptText.includes('--- ルール（厳守） ---') &&
-            ctx.promptText.includes('ダミールール注入テスト');
+            ctx.promptText.includes('デフォ注入D') &&
+            ctx.promptText.includes('## この議論の共通ルール\n共通注入C') &&
+            ctx.promptText.includes('## あなたの個別ルール\nA個別注入');
         } else {
-          // シンセシスターン（roundなし）
-          seen.synthPromptHasRules = ctx.promptText.includes('ダミールール注入テスト');
+          seen.synthPrompt = ctx.promptText; // シンセシスターン（roundなし）
         }
         return { utterance: '発言', cardOps: [], pass: false };
       },
     },
-    b: alwaysSpeakAdapter('B'),
+    b: {
+      async speak(ctx) {
+        seen.bHasAOwn = ctx.promptText.includes('A個別注入');
+        return { utterance: 'B発言', cardOps: [], pass: false };
+      },
+    },
   };
 
   await runDebate({ stateDir, board, adapters });
 
-  assert.equal(seen.turnCtxRules, 'ダミールール注入テスト');
-  assert.equal(seen.turnPromptHasRules, true);
-  assert.equal(seen.synthPromptHasRules, true);
+  assert.equal(
+    seen.aCtxRules,
+    'デフォ注入D\n\n## この議論の共通ルール\n共通注入C\n\n## あなたの個別ルール\nA個別注入'
+  );
+  assert.equal(seen.aPromptOk, true);
+  assert.equal(seen.bHasAOwn, false); // BのプロンプトにAの個別は入らない
+  assert.ok(seen.synthPrompt.includes('デフォ注入D'));
+  assert.ok(seen.synthPrompt.includes('共通注入C'));
+  assert.ok(!seen.synthPrompt.includes('A個別注入')); // シンセシスは個別なし
 });

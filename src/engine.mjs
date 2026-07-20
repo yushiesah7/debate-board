@@ -16,7 +16,7 @@
  */
 
 import { saveBoard, appendTranscript, applyCardOps, loadTranscript } from './state.mjs';
-import { boardSummary, buildTurnPrompt, buildSynthesisPrompt, TURN_SCHEMA } from './prompt.mjs';
+import { boardSummary, buildTurnPrompt, buildSynthesisPrompt, composeRulesFor, TURN_SCHEMA } from './prompt.mjs';
 
 /**
  * @typedef {object} TurnResult
@@ -149,7 +149,10 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
         boardSummary: boardSummary(board),
         ownNote: board.notes[participant.id] ?? '',
         recentTranscript: recentSlice(history, round),
-        rules: typeof board.meta.rules === 'string' ? board.meta.rules : '',
+        // ルール3層を参加者ごとに合成（default + common + 自分のbyId）。
+        // 毎ターンここで合成するので、実行中の /api/session-rules による
+        // board.meta.rules のmutateが次ターンから自然に反映される
+        rules: composeRulesFor(board.meta.rules, participant.id),
         schemaJson: TURN_SCHEMA,
         humanTimeoutMs,
       };
@@ -252,7 +255,8 @@ async function runSynthesis({ stateDir, board, history, adapters, emit }) {
   let summary = null;
   if (synthesisParticipant) {
     const transcriptTail = history.slice(-20);
-    const rules = typeof board.meta.rules === 'string' ? board.meta.rules : '';
+    // シンセシスは default + common のみ（個別ルールは特定参加者向けなので付けない）
+    const rules = composeRulesFor(board.meta.rules, null);
     const ctx = {
       participant: synthesisParticipant,
       topic: board.meta.topic,

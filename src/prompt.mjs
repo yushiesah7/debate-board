@@ -86,6 +86,36 @@ export const TURN_SCHEMA = {
 };
 
 /**
+ * ルール3層 { defaultSnapshot, common, byId } を、指定参加者向けの合成済み
+ * ルール文字列にする純関数。
+ * - defaultSnapshot（デフォルトルール=PARTICIPANT_RULES.mdのstart時スナップショット）はそのまま先頭
+ * - common は「## この議論の共通ルール」見出し付き
+ * - byId[participantId] は「## あなたの個別ルール」見出し付き
+ * 非空のものだけを結合し、全部空なら "" を返す。
+ * participantId が null/undefined（シンセシス等）なら個別ルールは付かない。
+ * 後方互換: rulesObj が string ならそのままtrimして返す（旧形式）。
+ *
+ * @param {{defaultSnapshot?:string, common?:string, byId?:Object<string,string>}|string|null|undefined} rulesObj
+ * @param {string|null} [participantId]
+ * @returns {string}
+ */
+export function composeRulesFor(rulesObj, participantId) {
+  if (typeof rulesObj === 'string') return rulesObj.trim();
+  if (!rulesObj || typeof rulesObj !== 'object') return '';
+  const parts = [];
+  const def = typeof rulesObj.defaultSnapshot === 'string' ? rulesObj.defaultSnapshot.trim() : '';
+  if (def) parts.push(def);
+  const common = typeof rulesObj.common === 'string' ? rulesObj.common.trim() : '';
+  if (common) parts.push(`## この議論の共通ルール\n${common}`);
+  const own =
+    participantId != null && rulesObj.byId && typeof rulesObj.byId[participantId] === 'string'
+      ? rulesObj.byId[participantId].trim()
+      : '';
+  if (own) parts.push(`## あなたの個別ルール\n${own}`);
+  return parts.join('\n\n');
+}
+
+/**
  * ルール文字列を「--- ルール（厳守） ---」セクションの行配列にする。
  * rules が空・未指定なら空配列（＝セクションごと省略）。
  * @param {string} [rules]

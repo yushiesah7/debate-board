@@ -21,7 +21,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { loadConfig } from './config.mjs';
-import { createDebate, saveBoard, applyCardOps, loadTranscript } from './state.mjs';
+import { createDebate, saveBoard, applyCardOps, loadTranscript, normalizeRules } from './state.mjs';
 import { runDebate } from './engine.mjs';
 import { resolveAdapter } from './adapters/index.mjs';
 import { makeHuman, HUMAN_TIMEOUT_MS } from './adapters/human.mjs';
@@ -35,8 +35,8 @@ const DEFAULT_RULES_PATH = path.join(__dirname, '..', 'PARTICIPANT_RULES.md');
 /** /api/start の追加ルール（rules）の最大文字数。超過は400。 */
 const MAX_EXTRA_RULES_CHARS = 4000;
 
-/** POST /api/rules の基本ルール（baseRules）の最大文字数。超過は400。 */
-const MAX_BASE_RULES_CHARS = 8000;
+/** POST /api/session-rules の common / byId 各エントリの最大文字数。超過は400。 */
+const MAX_SESSION_RULES_CHARS = 4000;
 
 /** POSTボディの上限（暴走・DoS対策のガード。ローカル専用アプリなので大きめでよい）。 */
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -48,26 +48,18 @@ const CLI_ADAPTER_NAMES = ['claude', 'codex', 'grok'];
 const OPTIONS_CACHE_TTL_MS = 10 * 60 * 1000;
 
 /**
- * 参加AIの行動ルールを合成する（合成はサーバ/CLI側の責務。engine/stateはfsを読まない）。
- * 基本ルールは rulesPath（PARTICIPANT_RULES.md）から**開始のたびに**読む
- * （＝ファイル編集が次の議論から反映される）。ファイルが無ければ空として扱う。
- * 追加ルール（extraRules）が非空なら「## 今回の追加ルール」見出しで結合する。
+ * デフォルトルールファイル（rulesPath=PARTICIPANT_RULES.md）を読む。
+ * ファイルが無ければ ""。startのたびに呼ぶ（＝編集が次の議論から反映される）。
+ * ファイル読込はサーバ/CLI側の責務（engine/stateはfsを読まない）。
  * @param {string} rulesPath
- * @param {string} [extraRules]
  * @returns {string}
  */
-export function composeRules(rulesPath, extraRules) {
-  let base = '';
+export function readDefaultRules(rulesPath) {
   try {
-    base = fs.readFileSync(rulesPath, 'utf8').trim();
+    return fs.readFileSync(rulesPath, 'utf8').trim();
   } catch {
-    base = '';
+    return '';
   }
-  const extra = typeof extraRules === 'string' ? extraRules.trim() : '';
-  if (base && extra) return `${base}\n\n## 今回の追加ルール\n${extra}`;
-  if (base) return base;
-  if (extra) return `## 今回の追加ルール\n${extra}`;
-  return '';
 }
 
 /** @param {number} ms */
@@ -179,6 +171,13 @@ export function createServer({
   let optionsCache = null;
   /** @type {Promise<object>|null} 収集中の重複実行を防ぐインフライトPromise */
   let optionsInflight = null;
+  /**
+   * その場のルールの開始前ステージング（git外・メモリのみ）。
+   * /api/start 時に defaultSnapshot（ファイル読込）と合成されて board.meta.rules になる。
+   * 実行中の編集はステージングではなく board.meta.rules を直接mutateする。
+   * @type {{common: string, byId: Object<string, string>}}
+   */
+  const sessionRules = { common: '', byId: {} };
 
   /** @param {{type:string, [k:string]:any}} event */
   function broadcast(event) {
@@ -276,12 +275,41 @@ export function createServer({
     });
   }
 
+  /** 議論が「実行中」（rules編集がboardへ直接効く状態）かどうか */
+  function isDebateActive() {
+    return !!currentBoard && currentBoard.meta.status !== 'ended';
+  }
+
+  /**
+   * GUI契約用の現在の実効rulesビュー `{default, common, byId}`。
+   * - 実行中: board.meta.rules（defaultSnapshot→defaultに改名して返す）
+   * - idle/終了後: ステージング＋rulesPathの現在の中身
+   */
+  function currentRulesView() {
+    if (isDebateActive()) {
+      const r = normalizeRules(currentBoard.meta.rules);
+      return { default: r.defaultSnapshot, common: r.common, byId: { ...r.byId } };
+    }
+    return {
+      default: readDefaultRules(rulesPath),
+      common: sessionRules.common,
+      byId: { ...sessionRules.byId },
+    };
+  }
+
   /** SPEC §8 の GET /api/state 応答形を組み立てる */
   function buildStateResponse() {
     if (!currentBoard) {
       return {
         board: {
-          meta: { topic: '', round: 0, maxRounds: config.maxRounds, status: 'idle', endedBy: null, rules: '' },
+          meta: {
+            topic: '',
+            round: 0,
+            maxRounds: config.maxRounds,
+            status: 'idle',
+            endedBy: null,
+            rules: currentRulesView(),
+          },
           cards: [],
           notes: {},
           summary: null,
@@ -299,7 +327,7 @@ export function createServer({
           maxRounds: currentBoard.meta.maxRounds,
           status: currentBoard.meta.status,
           endedBy: currentBoard.meta.endedBy ?? null,
-          rules: typeof currentBoard.meta.rules === 'string' ? currentBoard.meta.rules : '',
+          rules: currentRulesView(),
         },
         cards: currentBoard.cards,
         notes: currentBoard.notes,
@@ -333,11 +361,20 @@ export function createServer({
   /**
    * @param {string} topic
    * @param {number} maxRounds
-   * @param {string} [extraRules] - 開始時の追加ルール（基本ルールファイルと合成される）
+   * @param {string} [extraRules] - 開始モーダルの追加ルール（commonへ追記結合される）
    */
   function startDebate(topic, maxRounds, extraRules) {
-    // 基本ルールはstart時に毎回ファイルから読む（編集が次の議論から反映される）
-    const rules = composeRules(rulesPath, extraRules);
+    // ルール3層を構成: defaultSnapshotはstart時に毎回ファイルから読んで固定保存。
+    // common/byIdは開始前ステージング。開始モーダルのextraRulesはcommonへ追記結合
+    const extra = typeof extraRules === 'string' ? extraRules.trim() : '';
+    const common = sessionRules.common && extra
+      ? `${sessionRules.common}\n${extra}`
+      : sessionRules.common || extra;
+    const rules = {
+      defaultSnapshot: readDefaultRules(rulesPath),
+      common,
+      byId: { ...sessionRules.byId },
+    };
     const board = createDebate(stateDir, topic, { maxRounds, rules, participants });
     currentBoard = board;
 
@@ -398,17 +435,8 @@ export function createServer({
     }
 
     if (pathname === '/api/rules') {
-      if (req.method === 'GET') return serveRules(res);
-      if (req.method === 'POST') {
-        let body;
-        try {
-          body = await readJsonBody(req);
-        } catch (err) {
-          return sendError(res, 400, err.message);
-        }
-        return handleRulesPost(body, res);
-      }
-      return sendError(res, 405, 'method not allowed');
+      if (req.method !== 'GET') return sendError(res, 405, 'method not allowed');
+      return serveRules(res);
     }
 
     const postRoutes = {
@@ -417,6 +445,8 @@ export function createServer({
       '/api/end': handleEnd,
       '/api/toggle': handleToggle,
       '/api/participant': handleParticipant,
+      '/api/session-rules': handleSessionRules,
+      '/api/import-notes': handleImportNotes,
       '/api/card': handleCard,
       '/api/say': handleSay,
       '/api/skip': handleSkip,
@@ -438,41 +468,19 @@ export function createServer({
   }
 
   /**
-   * GET /api/rules — 基本ルールファイル（rulesPath=PARTICIPANT_RULES.md）の現在の中身を返す。
-   * 毎回ファイルから読む（キャッシュしない）。ファイルが無ければ baseRules は ""。
+   * GET /api/rules — デフォルトルールファイル（rulesPath=PARTICIPANT_RULES.md）の
+   * 現在の中身を閲覧用に返す。毎回ファイルから読む（キャッシュしない）。無ければ ""。
+   * デフォルトルールはリポ文書なのでGUIからは編集不可（閲覧のみ）。
    * @param {import('node:http').ServerResponse} res
    */
   function serveRules(res) {
-    let baseRules = '';
+    let text = '';
     try {
-      baseRules = fs.readFileSync(rulesPath, 'utf8');
+      text = fs.readFileSync(rulesPath, 'utf8');
     } catch {
-      baseRules = '';
+      text = '';
     }
-    return sendJson(res, 200, { baseRules });
-  }
-
-  /**
-   * POST /api/rules — 基本ルールファイルを書き換える。
-   * saveBoard同様、tmpファイル→renameSync で原子的に書き込む。
-   * **実行中の議論には影響しない**: board.meta.rules は開始時に合成・固定されるため、
-   * ここでの変更は次の /api/start（または CLI 実行）から反映される。
-   * @param {object} body
-   * @param {import('node:http').ServerResponse} res
-   */
-  function handleRulesPost(body, res) {
-    if (typeof body.baseRules !== 'string') {
-      return sendError(res, 400, 'baseRules (string) is required');
-    }
-    if (body.baseRules.length > MAX_BASE_RULES_CHARS) {
-      return sendError(res, 400, `baseRules must be at most ${MAX_BASE_RULES_CHARS} characters`);
-    }
-    const dir = path.dirname(rulesPath);
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = `${rulesPath}.tmp`;
-    fs.writeFileSync(tmp, body.baseRules, 'utf8');
-    fs.renameSync(tmp, rulesPath);
-    return sendJson(res, 200, { baseRules: body.baseRules });
+    return sendJson(res, 200, { default: text });
   }
 
   /**
@@ -736,6 +744,132 @@ export function createServer({
     }
     persistParticipantConfig(body.id, patch);
 
+    broadcast({ type: 'update' });
+    return sendJson(res, 200, buildStateResponse());
+  }
+
+  /**
+   * POST /api/session-rules — その場の共通/個別ルールの部分更新マージ。
+   * - `common`: string（""でクリア=削除相当）
+   * - `byId`: { <pid>: string }（値""はそのエントリ削除）
+   * - common/各エントリとも最大 MAX_SESSION_RULES_CHARS 字。超過・非string・不正pidは400
+   * - idle/終了後: 開始前ステージング（sessionRules）へ／実行中: board.meta.rules をmutate＋saveBoard
+   *   （エンジンは毎ターン合成し直すので、次にその参加者のspeakが呼ばれるターンから反映される）
+   * @param {object} body
+   * @param {import('node:http').ServerResponse} res
+   */
+  function handleSessionRules(body, res) {
+    if (!('common' in body) && !('byId' in body)) {
+      return sendError(res, 400, 'at least one of common / byId is required');
+    }
+    // ---- 検証（全部OKになるまで一切適用しない） ----
+    let newCommon;
+    if ('common' in body) {
+      if (typeof body.common !== 'string') {
+        return sendError(res, 400, 'common must be a string');
+      }
+      if (body.common.length > MAX_SESSION_RULES_CHARS) {
+        return sendError(res, 400, `common must be at most ${MAX_SESSION_RULES_CHARS} characters`);
+      }
+      newCommon = body.common;
+    }
+    /** @type {Array<[string, string]>|null} */
+    let byIdEntries = null;
+    if ('byId' in body) {
+      if (!body.byId || typeof body.byId !== 'object' || Array.isArray(body.byId)) {
+        return sendError(res, 400, 'byId must be an object of { participantId: string }');
+      }
+      byIdEntries = [];
+      const knownIds = new Set(
+        (currentBoard ? currentBoard.participants : participants).map((p) => p.id)
+      );
+      for (const [pid, text] of Object.entries(body.byId)) {
+        if (!knownIds.has(pid)) {
+          return sendError(res, 400, `unknown participant id "${pid}" in byId`);
+        }
+        if (typeof text !== 'string') {
+          return sendError(res, 400, `byId["${pid}"] must be a string`);
+        }
+        if (text.length > MAX_SESSION_RULES_CHARS) {
+          return sendError(
+            res,
+            400,
+            `byId["${pid}"] must be at most ${MAX_SESSION_RULES_CHARS} characters`
+          );
+        }
+        byIdEntries.push([pid, text]);
+      }
+    }
+
+    // ---- 適用先の決定とマージ ----
+    /** @param {{common:string, byId:Object<string,string>}} target */
+    const applyTo = (target) => {
+      if (newCommon !== undefined) target.common = newCommon;
+      if (byIdEntries) {
+        for (const [pid, text] of byIdEntries) {
+          if (text === '') {
+            delete target.byId[pid]; // ""はエントリ削除
+          } else {
+            target.byId[pid] = text;
+          }
+        }
+      }
+    };
+
+    if (isDebateActive()) {
+      currentBoard.meta.rules = normalizeRules(currentBoard.meta.rules);
+      applyTo(currentBoard.meta.rules);
+      saveBoard(stateDir, currentBoard);
+    } else {
+      applyTo(sessionRules);
+    }
+
+    broadcast({ type: 'update' });
+    return sendJson(res, 200, buildStateResponse());
+  }
+
+  /**
+   * POST /api/import-notes — notes.json（持ち運び用）の取り込み。
+   * 実行中の議論が無ければ409。
+   * - `notes`: { <pid>: string } — 既知の参加者のみ上書きマージ（未知pidはスキップ）
+   * - `cards`: [{lane,title,body}] — 既存カードに**追加**（新規ID採番・createdBy="import"）
+   * - `summary`: 上書きしない（無視）
+   * @param {object} body
+   * @param {import('node:http').ServerResponse} res
+   */
+  function handleImportNotes(body, res) {
+    if (!isDebateActive()) {
+      return sendError(res, 409, 'no debate in progress to import into');
+    }
+    if (body.notes !== undefined && (typeof body.notes !== 'object' || body.notes === null || Array.isArray(body.notes))) {
+      return sendError(res, 400, 'notes must be an object of { participantId: string }');
+    }
+    if (body.cards !== undefined && !Array.isArray(body.cards)) {
+      return sendError(res, 400, 'cards must be an array');
+    }
+
+    if (body.notes) {
+      for (const [pid, text] of Object.entries(body.notes)) {
+        if (typeof text !== 'string') continue;
+        if (!(pid in currentBoard.notes)) continue; // 未知pidはスキップ
+        currentBoard.notes[pid] = text;
+      }
+    }
+
+    if (Array.isArray(body.cards) && body.cards.length > 0) {
+      const ops = body.cards
+        .filter((c) => c && typeof c === 'object' && !Array.isArray(c))
+        .map((c) => ({
+          op: 'add',
+          lane: c.lane,
+          title: c.title,
+          body: typeof c.body === 'string' ? c.body : '',
+        }));
+      // 不正lane・title欠落はapplyCardOpsが弾いてwarningsに積む（採番はcardSeqで自動）
+      applyCardOps(currentBoard, ops, 'import');
+    }
+
+    saveBoard(stateDir, currentBoard);
     broadcast({ type: 'update' });
     return sendJson(res, 200, buildStateResponse());
   }

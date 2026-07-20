@@ -33,12 +33,19 @@
 ollama / openai-compat / human はHTTP・GUIのみでPCに触れないため対象外（指定は無視）。
 grokの `--max-turns` はツール使用の周回上限（1発言の所要時間ガード。ファイル参照の周回分を確保しつつ暴走探索を防ぐ）。
 
-### 参加AIのルール
+### 参加AIのルール（3層）
 
-- **基本ルール**: リポ直下の `PARTICIPANT_RULES.md`（コミット対象）。議論**開始のたびに**読み込むため、編集は次の議論から反映。ファイルが無ければ空扱い。GUI（📜ルールボタン）からも編集可（`GET/POST /api/rules`）
-- **今回の追加ルール**: 開始時に指定（GUI開始モーダル／`POST /api/start` の `rules`／CLI第3引数）。最大4000字
-- 合成: `基本 + "\n\n## 今回の追加ルール\n" + 追加` をサーバ/CLI側で行い `board.meta.rules` に保存（エンジン/stateはfsを読まない純ロジックを維持）
-- 注入: 毎ターンおよびシンセシスのプロンプトで、お題の直後に「--- ルール（厳守） ---」セクションとして挿入（rulesが空ならセクションごと省略）
+| 層 | 置き場 | 編集 | 適用範囲 |
+|---|---|---|---|
+| **デフォルト** | リポ直下 `PARTICIPANT_RULES.md`（コミット対象） | ファイル編集のみ（GUIは閲覧のみ=`GET /api/rules`） | 常時。start時にスナップショットを `board.meta.rules.defaultSnapshot` へ固定保存 |
+| **その場の共通** | セッション/board（git外） | 📜モーダル・開始モーダルの追加ルール・`POST /api/session-rules` | その議論の全参加AI |
+| **その場の個別** | セッション/board（git外） | 📜モーダル・`POST /api/session-rules` | 特定の参加者のみ |
+
+- `board.meta.rules` は `{defaultSnapshot, common, byId:{<pid>:string}}`。旧string形式のboardは読込時に `{defaultSnapshot:"", common:<旧文字列>, byId:{}}` へ変換（後方互換）
+- 開始前の共通/個別編集はサーバ内ステージングに保持され、`/api/start` 時に defaultSnapshot（ファイル読込）＋ステージング＋開始モーダルの追加ルール（commonへ追記結合）で board.meta.rules を構成。実行中の編集は board を直接更新し**次ターンから反映**
+- プロンプト合成は純関数 `composeRulesFor(rulesObj, participantId)`: default → 「## この議論の共通ルール」common → 「## あなたの個別ルール」byId[pid] を非空のものだけ結合。シンセシスは default+common のみ
+- 注入位置: 毎ターン/シンセシスのプロンプトでお題の直後に「--- ルール（厳守） ---」セクション（全部空なら省略）
+- 持ち運び: 📜モーダルから rules.json（`{type:"debate-board-rules",version:1,common,participants}`。defaultは含めない）をエクスポート/インポート。NOTEタブから notes.json（`{type:"debate-board-notes",version:1,notes,summary,cards}`）をエクスポートし、`POST /api/import-notes` で取り込み
 
 ### アダプタ種別
 
@@ -129,15 +136,16 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 
 | メソッド/パス | ボディ / 応答 |
 |---|---|
-| GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy,rules},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`） |
+| GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy,rules:{default,common,byId}},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`） |
 | GET `/api/options` | 応答 `{adapters:{<adapter名>:{models:string[], efforts:string[]}}}`。参加者設定UIの候補。サーバが実環境から自動発見（codex=`~/.codex/models_cache.json`、grok=`grok models`、ollama=`GET /api/tags`、openai-compat=`GET /v1/models`、claude=静的）し、結果を10分メモリキャッシュ。失敗したアダプタは静的フォールバックへ。**常に200** |
 | SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"ended"}` |
-| POST `/api/start` | `{topic, maxRounds, rules?}`（ONが2人未満なら400。`rules`は今回だけの追加ルール文字列・任意・最大4000字（超過400）。`PARTICIPANT_RULES.md` の基本ルールとサーバ側で合成され `board.meta.rules` へ） |
+| POST `/api/start` | `{topic, maxRounds, rules?}`（ONが2人未満なら400。`rules`は開始モーダルの追加ルール文字列・任意・最大4000字（超過400）。**commonへ追記結合**され、defaultSnapshot＋ステージング済み共通/個別と合わせて `board.meta.rules` を構成） |
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |
 | POST `/api/end` | `{}` |
 | POST `/api/toggle` | `{id, enabled}` |
-| GET `/api/rules` | 応答 `{baseRules: string}` — `PARTICIPANT_RULES.md` の現在の中身（無ければ`""`）。毎回ファイルから読む |
-| POST `/api/rules` | `{baseRules: string}`（string以外400・最大8000字超過400）。ファイルへ原子的書き込み。応答 `{baseRules}`。**実行中の議論には影響しない**（次のstartから反映） |
+| GET `/api/rules` | 応答 `{default: string}` — `PARTICIPANT_RULES.md` の現在の中身（無ければ`""`）。**閲覧専用**（GUIから編集不可）。毎回ファイルから読む。GETのみ（他メソッド405） |
+| POST `/api/session-rules` | `{common?: string, byId?: {<pid>: string}}` 部分更新マージ。byIdの値`""`はそのエントリ削除。common/各エントリ最大4000字（超過400）・非string 400・不正pid 400。idle時=開始前ステージングへ／実行中=board.meta.rulesをmutate＋saveBoard＋SSE update（**次ターンから反映**） |
+| POST `/api/import-notes` | `{notes?: {<pid>: string}, cards?: [{lane,title,body}]}`。実行中の議論が無ければ**409**。notesは既知pidのみ上書きマージ（未知pidスキップ）、cardsは既存カードへ**追加**（新規ID採番・createdBy="import"）、summaryは上書きしない（無視） |
 | POST `/api/participant` | `{id, model?, effort?, pcAccess?}`（`model`/`effort`は非空文字列で設定、`null`か空文字でそのフィールドを削除=CLI既定継承。`pcAccess`は`"read"`\|`"full"`のみ、CLI系（claude/codex/grok）以外は無視。human参加者は全フィールド無視（400にはしない）。不正id・不正pcAccessは400。config.jsonへ永続化し、実行中なら該当参加者の次ターンから反映） |
 | POST `/api/card` | `{op:"add"\|"move"\|"edit", cardId?, lane?, title?, body?}`（編集でレーン変更する場合はedit→moveの2リクエスト可） |
 | POST `/api/say` | `{text}`（awaitingHuman時のみ有効） |

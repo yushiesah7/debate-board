@@ -9,7 +9,12 @@
  *   {
  *     meta: { id, topic, status, round, maxRounds, rules, cardSeq, createdAt, updatedAt, endedBy? },
  *       - round は「完了したラウンド番号」（ラウンド完了時にのみ確定書き込みされる）
- *       - rules は参加AIの行動ルール全文（無ければ ""）。エンジンが毎ターンのプロンプトに注入する
+ *       - rules は参加AIの行動ルール3層 { defaultSnapshot, common, byId }:
+ *           defaultSnapshot = start時の PARTICIPANT_RULES.md の内容を固定保存（string）
+ *           common          = その場の共通ルール（string、git外＝boardにのみ保存）
+ *           byId            = その場の個別ルール { <participantId>: string }
+ *         旧形式（string）のboardは loadDebate が
+ *         { defaultSnapshot:"", common:<旧文字列>, byId:{} } へ変換する（後方互換）
  *       - endedBy は終了時のみ: "maxRounds" | "allPass" | "ending" | "noParticipants"
  *     participants: [{ id, name, adapter, model?, endpoint?, persona?, enabled, pcAccess, effort?, session? }, ...],
  *     cards: [{ id, lane, title, body, createdBy, updatedBy, updatedAt }, ...],
@@ -28,12 +33,41 @@ import crypto from 'node:crypto';
 export const LANES = ['decided', 'discussing', 'held'];
 
 /**
+ * rules値を3層形式 { defaultSnapshot, common, byId } に正規化する。
+ * - オブジェクト: 各フィールドを型チェックしつつコピー（byIdはstring値のみ採用）
+ * - 旧string形式: { defaultSnapshot:"", common:<旧文字列>, byId:{} } へ変換（後方互換）
+ * - それ以外（null/undefined等）: 全て空
+ * @param {unknown} value
+ * @returns {{defaultSnapshot: string, common: string, byId: Object<string, string>}}
+ */
+export function normalizeRules(value) {
+  if (typeof value === 'string') {
+    return { defaultSnapshot: '', common: value, byId: {} };
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const obj = /** @type {Record<string, unknown>} */ (value);
+    const byId = {};
+    if (obj.byId && typeof obj.byId === 'object' && !Array.isArray(obj.byId)) {
+      for (const [pid, text] of Object.entries(obj.byId)) {
+        if (typeof text === 'string' && text !== '') byId[pid] = text;
+      }
+    }
+    return {
+      defaultSnapshot: typeof obj.defaultSnapshot === 'string' ? obj.defaultSnapshot : '',
+      common: typeof obj.common === 'string' ? obj.common : '',
+      byId,
+    };
+  }
+  return { defaultSnapshot: '', common: '', byId: {} };
+}
+
+/**
  * 新しい議論を作成し、state ディレクトリと board.json / transcript.jsonl を初期化する。
  *
  * @param {string} stateDir - state ルートディレクトリ（例: "state"）
  * @param {string} topic - お題
- * @param {{maxRounds?: number, rules?: string, participants: Array<{id:string,name:string,adapter:string,model?:string,endpoint?:string,persona?:string,enabled:boolean}>}} config
- *   - rules: 参加AIの行動ルール全文（基本＋今回の追加を呼び出し側で結合済みの文字列。ファイル読込はサーバ/CLI側の責務）
+ * @param {{maxRounds?: number, rules?: {defaultSnapshot?:string, common?:string, byId?:Object<string,string>}|string, participants: Array<{id:string,name:string,adapter:string,model?:string,endpoint?:string,persona?:string,enabled:boolean}>}} config
+ *   - rules: 参加AIの行動ルール3層（string渡しは旧形式としてcommonへ正規化。ファイル読込・合成はサーバ/CLI側の責務）
  * @returns {object} 作成された board オブジェクト（board.meta.id に debateId が入る）
  */
 export function createDebate(stateDir, topic, config) {
@@ -66,7 +100,7 @@ export function createDebate(stateDir, topic, config) {
       status: 'running',
       round: 0,
       maxRounds: config?.maxRounds ?? 4,
-      rules: typeof config?.rules === 'string' ? config.rules : '',
+      rules: normalizeRules(config?.rules),
       cardSeq: 1,
       createdAt: now,
       updatedAt: now,
@@ -95,7 +129,12 @@ export function createDebate(stateDir, topic, config) {
 export function loadDebate(stateDir, debateId) {
   const boardPath = path.join(stateDir, debateId, 'board.json');
   const raw = fs.readFileSync(boardPath, 'utf8');
-  return JSON.parse(raw);
+  const board = JSON.parse(raw);
+  // 後方互換: 旧形式（rulesがstring）や欠落を3層形式へ正規化する
+  if (board?.meta) {
+    board.meta.rules = normalizeRules(board.meta.rules);
+  }
+  return board;
 }
 
 /**

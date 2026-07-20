@@ -379,6 +379,7 @@
 
 <div id="mock-badge" title="クリックでサーバ再接続を試す">モックモード</div>
 <div id="toast"></div>
+<input type="file" id="notes-import-file" accept=".json,application/json" style="display:none;">
 
 <header>
   <h1>debate-board</h1>
@@ -460,9 +461,9 @@
     <input id="start-topic-input" type="text" maxlength="200" placeholder="例: きのこ vs たけのこ">
     <label>ラウンド数</label>
     <input id="start-rounds-input" type="number" min="1" max="20" value="4">
-    <label>今回だけの追加ルール（任意）</label>
+    <label>今回だけの追加ルール（任意・共通ルールに追記）</label>
     <textarea id="start-rules-input" maxlength="4000" placeholder="例: 編集はLab\repos\xxxのみ可／結論は3案まで" style="min-height:70px;"></textarea>
-    <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">基本ルールは PARTICIPANT_RULES.md を編集（常時適用）</div>
+    <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">デフォルトルールは PARTICIPANT_RULES.md（常時適用・読み取り専用）。共通・個別ルールは📜から編集できます</div>
     <div id="start-error"></div>
     <div class="modal-actions">
       <button id="start-modal-cancel">キャンセル</button>
@@ -471,22 +472,37 @@
   </div>
 </div>
 
-<!-- ルールモーダル（基本ルール編集＋今回の議論のルール表示） -->
+<!-- ルールモーダル（3層: デフォルト閲覧／共通編集／個別編集＋エクスポート/インポート） -->
 <div class="modal-overlay" id="rules-modal">
-  <div class="modal-box" style="width:560px;">
+  <div class="modal-box" style="width:620px;">
     <h3>📜 参加AIのルール</h3>
 
-    <label for="rules-base-input">基本ルール（PARTICIPANT_RULES.md・常時適用）</label>
-    <textarea id="rules-base-input" maxlength="8000" style="font-family:Consolas,Monaco,monospace; min-height:160px;"></textarea>
-    <div style="display:flex; align-items:center; justify-content:space-between; margin-top:6px;">
-      <div style="font-size:11px; color:var(--text-dim);">保存すると次の議論から反映されます</div>
-      <button id="rules-base-save" class="primary">保存</button>
+    <details style="margin-bottom:10px;">
+      <summary style="cursor:pointer; font-size:12px; color:var(--text-dim);">デフォルトルール（PARTICIPANT_RULES.md・読み取り専用・常時適用）</summary>
+      <div id="rules-default-body" style="font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:25vh; overflow-y:auto; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px; margin-top:6px;"></div>
+    </details>
+
+    <label for="rules-common-input">この議論の共通ルール（全参加AIに適用・セッション限り）</label>
+    <textarea id="rules-common-input" maxlength="4000" style="min-height:80px;"></textarea>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-top:4px;">
+      <div style="font-size:11px; color:var(--text-dim);">実行中の議論では次のターンから反映。空で保存=クリア</div>
+      <button id="rules-common-save" class="primary">共通を保存</button>
     </div>
 
-    <label style="margin-top:16px;">今回の議論のルール</label>
-    <div id="rules-current-body" style="font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:30vh; overflow-y:auto; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px;"></div>
+    <label style="margin-top:14px;">個別ルール（参加者ごと・セッション限り）</label>
+    <div id="rules-byid-tabs" style="display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px;"></div>
+    <textarea id="rules-byid-input" maxlength="4000" style="min-height:80px;"></textarea>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-top:4px;">
+      <div style="font-size:11px; color:var(--text-dim);">空で保存=その参加者の個別ルールを削除</div>
+      <button id="rules-byid-save" class="primary">個別を保存</button>
+    </div>
 
-    <div class="modal-actions">
+    <div class="modal-actions" style="justify-content:space-between;">
+      <div style="display:flex; gap:8px;">
+        <button id="rules-export" title="共通・個別ルールをJSONでダウンロード（デフォルトは含めない）">⬇ ルールをエクスポート</button>
+        <button id="rules-import" title="rules.jsonを読み込んで一括適用">⬆ インポート</button>
+        <input type="file" id="rules-import-file" accept=".json,application/json" style="display:none;">
+      </div>
       <button id="rules-modal-close">閉じる</button>
     </div>
   </div>
@@ -538,7 +554,7 @@
   function buildMockState() {
     return {
       board: {
-        meta: { topic: "きのこ vs たけのこ", round: 2, status: "paused", rules: "" },
+        meta: { topic: "きのこ vs たけのこ", round: 2, status: "paused", rules: { default: "", common: "", byId: {} } },
         cards: [
           { id: "c1", lane: "decided", title: "呼称は正式表記で統一", body: "「きのこの山」「たけのこの里」の正式商品名で議論する。", createdBy: "凪" },
           { id: "c2", lane: "decided", title: "評価軸は3つに絞る", body: "食感・チョコ比率・携帯性の3軸で比較する。", createdBy: "アキ" },
@@ -693,8 +709,12 @@
       state.board.meta.round = 1;
       state.board.meta.status = "running";
       state.board.meta.maxRounds = body.maxRounds || 4;
-      // モックでは基本ルールファイルを読めないので、追加ルールだけをローカル反映する
-      state.board.meta.rules = body.rules ? "## 今回の追加ルール\n" + body.rules : "";
+      // モック: 開始モーダルの追加ルールをcommonへ追記結合（サーバと同じ流儀）
+      var mockRules = state.board.meta.rules || { default: "", common: "", byId: {} };
+      if (body.rules) {
+        mockRules.common = mockRules.common ? mockRules.common + "\n" + body.rules : body.rules;
+      }
+      state.board.meta.rules = mockRules;
       state.board.cards = [];
       state.board.summary = null;
       state.transcript = [];
@@ -729,6 +749,37 @@
       if (myParticipantId) state.board.notes[myParticipantId] = body.text || "";
     } else if (path === "/api/participant") {
       applyMockParticipantPatch(body);
+    } else if (path === "/api/session-rules") {
+      var mr = state.board.meta.rules || (state.board.meta.rules = { default: "", common: "", byId: {} });
+      if (typeof body.common === "string") mr.common = body.common;
+      if (body.byId && typeof body.byId === "object") {
+        Object.keys(body.byId).forEach(function (pid) {
+          var text = body.byId[pid];
+          if (typeof text !== "string") return;
+          if (text === "") delete mr.byId[pid];
+          else mr.byId[pid] = text;
+        });
+      }
+    } else if (path === "/api/import-notes") {
+      if (body.notes && typeof body.notes === "object") {
+        Object.keys(body.notes).forEach(function (pid) {
+          if (typeof body.notes[pid] === "string" && (pid in state.board.notes)) {
+            state.board.notes[pid] = body.notes[pid];
+          }
+        });
+      }
+      if (Array.isArray(body.cards)) {
+        body.cards.forEach(function (c) {
+          if (!c || typeof c !== "object") return;
+          state.board.cards.push({
+            id: genId("c"),
+            lane: c.lane || "discussing",
+            title: c.title || "(無題)",
+            body: c.body || "",
+            createdBy: "import"
+          });
+        });
+      }
     }
   }
 
@@ -982,6 +1033,22 @@
       var editable = pid === myParticipantId;
       var wrap = document.createElement("div");
       wrap.id = "note-area";
+      // NOTEの持ち運び用エクスポート/インポート（notes.json）
+      var toolbar = document.createElement("div");
+      toolbar.style.cssText = "display:flex; gap:6px; justify-content:flex-end;";
+      var expBtn = document.createElement("button");
+      expBtn.textContent = "⬇ notes.json";
+      expBtn.title = "全NOTE・summary・カードをJSONでダウンロード";
+      expBtn.addEventListener("click", exportNotesJson);
+      var impBtn = document.createElement("button");
+      impBtn.textContent = "⬆ インポート";
+      impBtn.title = "notes.jsonを読み込んで取り込み（実行中の議論のみ）";
+      impBtn.addEventListener("click", function () {
+        document.getElementById("notes-import-file").click();
+      });
+      toolbar.appendChild(expBtn);
+      toolbar.appendChild(impBtn);
+      wrap.appendChild(toolbar);
       var textarea = document.createElement("textarea");
       textarea.id = "note-textarea";
       textarea.dataset.pid = pid;
@@ -1270,67 +1337,216 @@
   });
 
   // ------------------------------------------------------------------
-  // ルールモーダル（基本ルール編集＋今回の議論のルール表示）
+  // ルールモーダル（3層: デフォルト閲覧／共通編集／個別編集＋エクスポート/インポート）
   // ------------------------------------------------------------------
-  var MOCK_BASE_RULES_SAMPLE =
+  var MOCK_DEFAULT_RULES_SAMPLE =
     "# 参加AIの基本ルール（モック表示サンプル）\n" +
     "- あなたは議論の参加者。PCのファイル閲覧は議論の根拠収集のためだけに使う\n" +
     "- 出力契約（JSON形式）を必ず守る";
 
-  function renderCurrentRulesSection() {
-    var body = document.getElementById("rules-current-body");
-    var rules = (state && state.board.meta && state.board.meta.rules) || "";
-    if (typeof rules === "string" && rules.trim().length > 0) {
-      body.textContent = rules;
-    } else {
-      body.textContent = "議論開始時に、基本ルール＋開始モーダルの追加ルールが合成されて各AIに毎ターン渡されます";
-    }
+  var rulesActivePid = null; // 個別ルールタブで選択中の参加者id
+
+  // 現在の実効rules {default, common, byId}（/api/state契約）。壊れていても安全な形で返す
+  function getRulesView() {
+    var r = state && state.board.meta && state.board.meta.rules;
+    if (!r || typeof r !== "object") return { default: "", common: "", byId: {} };
+    return {
+      default: typeof r.default === "string" ? r.default : "",
+      common: typeof r.common === "string" ? r.common : "",
+      byId: (r.byId && typeof r.byId === "object") ? r.byId : {}
+    };
   }
 
-  document.getElementById("btn-rules").addEventListener("click", function () {
-    renderCurrentRulesSection();
-    var input = document.getElementById("rules-base-input");
-    if (MOCK) {
-      input.value = MOCK_BASE_RULES_SAMPLE;
-      document.getElementById("rules-modal").classList.add("show");
-      return;
+  function renderRulesByIdTabs() {
+    var tabs = document.getElementById("rules-byid-tabs");
+    tabs.innerHTML = "";
+    var rules = getRulesView();
+    (state.participants || []).forEach(function (p) {
+      var btn = document.createElement("button");
+      btn.className = "tab-btn" + (rulesActivePid === p.id ? " active" : "");
+      var mark = rules.byId[p.id] ? " ●" : "";
+      btn.textContent = p.name + mark;
+      btn.addEventListener("click", function () {
+        rulesActivePid = p.id;
+        renderRulesByIdTabs();
+        document.getElementById("rules-byid-input").value = getRulesView().byId[p.id] || "";
+      });
+      tabs.appendChild(btn);
+    });
+  }
+
+  function openRulesModal() {
+    var rules = getRulesView();
+    document.getElementById("rules-common-input").value = rules.common || "";
+    if (!rulesActivePid || !(state.participants || []).some(function (p) { return p.id === rulesActivePid; })) {
+      rulesActivePid = (state.participants && state.participants[0]) ? state.participants[0].id : null;
     }
-    input.value = "";
-    input.placeholder = "読み込み中...";
+    renderRulesByIdTabs();
+    document.getElementById("rules-byid-input").value = (rulesActivePid && rules.byId[rulesActivePid]) || "";
+
+    var defaultBody = document.getElementById("rules-default-body");
+    if (MOCK) {
+      defaultBody.textContent = MOCK_DEFAULT_RULES_SAMPLE;
+    } else {
+      defaultBody.textContent = "読み込み中...";
+      fetch("/api/rules").then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status + " /api/rules");
+        return res.json();
+      }).then(function (data) {
+        defaultBody.textContent = (data && typeof data.default === "string" && data.default) ? data.default : "(デフォルトルールはありません)";
+      }).catch(function (err) {
+        console.error("rules fetch failed:", err);
+        defaultBody.textContent = "(読み込みに失敗しました)";
+      });
+    }
     document.getElementById("rules-modal").classList.add("show");
-    fetch("/api/rules").then(function (res) {
-      if (!res.ok) throw new Error("HTTP " + res.status + " /api/rules");
-      return res.json();
-    }).then(function (data) {
-      input.value = (data && typeof data.baseRules === "string") ? data.baseRules : "";
-      input.placeholder = "";
-    }).catch(function (err) {
-      console.error("rules fetch failed:", err);
-      input.placeholder = "";
-      showToast("基本ルールの読み込みに失敗しました");
+  }
+
+  document.getElementById("btn-rules").addEventListener("click", openRulesModal);
+
+  document.getElementById("rules-common-save").addEventListener("click", function () {
+    var text = document.getElementById("rules-common-input").value;
+    apiPost("/api/session-rules", { common: text }).then(function (r) {
+      if (r && r.ok) {
+        showToast(text ? "共通ルールを保存しました" : "共通ルールをクリアしました");
+        renderRulesByIdTabs();
+      }
     });
   });
 
-  document.getElementById("rules-base-save").addEventListener("click", function () {
-    var text = document.getElementById("rules-base-input").value;
-    if (MOCK) {
-      log("POST", "/api/rules", { baseRules: text });
-      showToast("モックモードでは保存されません");
-      return;
-    }
-    fetch("/api/rules", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ baseRules: text })
-    }).then(function (res) {
-      if (!res.ok) throw new Error("HTTP " + res.status + " /api/rules");
-      return res.json();
-    }).then(function () {
-      showToast("保存しました。次の議論から反映されます");
-    }).catch(function (err) {
-      console.error("rules save failed:", err);
-      showToast("基本ルールの保存に失敗しました");
+  document.getElementById("rules-byid-save").addEventListener("click", function () {
+    if (!rulesActivePid) return;
+    var text = document.getElementById("rules-byid-input").value;
+    var byId = {};
+    byId[rulesActivePid] = text;
+    apiPost("/api/session-rules", { byId: byId }).then(function (r) {
+      if (r && r.ok) {
+        showToast(text ? "個別ルールを保存しました" : "個別ルールを削除しました");
+        renderRulesByIdTabs();
+      }
     });
+  });
+
+  // ---- エクスポート/インポート（rules.json） ----
+  function downloadJson(filename, obj) {
+    var blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function timestampName(prefix) {
+    var d = new Date();
+    function pad(n) { return (n < 10 ? "0" : "") + n; }
+    return prefix + "-" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+      "-" + pad(d.getHours()) + pad(d.getMinutes()) + ".json";
+  }
+
+  document.getElementById("rules-export").addEventListener("click", function () {
+    var rules = getRulesView();
+    // defaultはリポ文書（PARTICIPANT_RULES.md）なので含めない
+    downloadJson(timestampName("rules"), {
+      type: "debate-board-rules",
+      version: 1,
+      common: rules.common || "",
+      participants: rules.byId || {}
+    });
+  });
+
+  document.getElementById("rules-import").addEventListener("click", function () {
+    document.getElementById("rules-import-file").click();
+  });
+  document.getElementById("rules-import-file").addEventListener("change", function () {
+    var file = this.files && this.files[0];
+    this.value = ""; // 同じファイルの再選択でもchangeが発火するように
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var data;
+      try { data = JSON.parse(String(reader.result)); } catch (err) {
+        showToast("JSONとして読み込めませんでした");
+        return;
+      }
+      if (!data || data.type !== "debate-board-rules") {
+        showToast("rules.json（type: debate-board-rules）ではありません");
+        return;
+      }
+      var knownIds = {};
+      (state.participants || []).forEach(function (p) { knownIds[p.id] = true; });
+      var byId = {};
+      var skipped = [];
+      if (data.participants && typeof data.participants === "object") {
+        Object.keys(data.participants).forEach(function (pid) {
+          var text = data.participants[pid];
+          if (typeof text !== "string") return;
+          if (knownIds[pid]) byId[pid] = text;
+          else skipped.push(pid);
+        });
+      }
+      var body = { byId: byId };
+      if (typeof data.common === "string") body.common = data.common;
+      apiPost("/api/session-rules", body).then(function (r) {
+        if (r && r.ok) {
+          var msg = "ルールをインポートしました";
+          if (skipped.length > 0) msg += "（未知の参加者をスキップ: " + skipped.join(", ") + "）";
+          showToast(msg);
+          openRulesModal(); // モーダル表示を最新化
+        }
+      });
+    };
+    reader.readAsText(file);
+  });
+
+  // ---- エクスポート/インポート（notes.json） ----
+  function exportNotesJson() {
+    var cards = (state.board.cards || []).map(function (c) {
+      return { lane: c.lane, title: c.title, body: c.body };
+    });
+    downloadJson(timestampName("notes"), {
+      type: "debate-board-notes",
+      version: 1,
+      notes: state.board.notes || {},
+      summary: state.board.summary,
+      cards: cards
+    });
+  }
+
+  document.getElementById("notes-import-file").addEventListener("change", function () {
+    var file = this.files && this.files[0];
+    this.value = "";
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var data;
+      try { data = JSON.parse(String(reader.result)); } catch (err) {
+        showToast("JSONとして読み込めませんでした");
+        return;
+      }
+      if (!data || data.type !== "debate-board-notes") {
+        showToast("notes.json（type: debate-board-notes）ではありません");
+        return;
+      }
+      var body = {};
+      if (data.notes && typeof data.notes === "object") body.notes = data.notes;
+      if (Array.isArray(data.cards)) body.cards = data.cards;
+      // summaryは取り込まない（上書きしない仕様）
+      if (!MOCK) {
+        var status = state && state.board.meta && state.board.meta.status;
+        if (status !== "running" && status !== "paused" && status !== "ending") {
+          showToast("実行中の議論が無いためインポートできません");
+          return;
+        }
+      }
+      apiPost("/api/import-notes", body).then(function (r) {
+        if (r && r.ok) showToast("notes.jsonを取り込みました（summaryは上書きしません）");
+      });
+    };
+    reader.readAsText(file);
   });
 
   document.getElementById("rules-modal-close").addEventListener("click", function () {
