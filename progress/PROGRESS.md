@@ -12,8 +12,9 @@
   - 終了時自動エクスポート（autoExportDir既定exports/・git外・CIガード追加）
   - 割り込み依頼 /api/interject（いつでも特定AIへ個人依頼。実行中はpause割り込み、終了後もended待機で応答。👤→/↩バッジ表示）
 - 意図的に触らなかったもの: interjectのラウンド番号表記（バッジで区別可・実害なし）、grok進捗のthought混在（絞りは1行変更で可）
-- 完了・未完了: 全て完了・push済み（main c537428）。テスト185件全緑
-- 次に確認すべきこと: yushiさんの再起動後の実戦使用感。M3残: 履歴閲覧・summaryのMarkdownエクスポート・resume最適化
+- 完了・未完了: 全て完了・push済み。テスト185件全緑
+- 追記: カード表面📋・README停止方法・**履歴機能（🗂一覧/詳細閲覧/📂読込→割り込み・延長再開/任意議論からの引き継ぎ inherit.fromDebateId）**まで完了（main 700aa54・テスト189件全緑）
+- 次に確認すべきこと: yushiさんの実戦使用感。M3残: summaryのMarkdownエクスポート・resume最適化・履歴のインデックス化（件数が数千になったら）
 
 ## 2026-07-20 (2) pcAccess・model/effort・参加者設定GUI（記録者: 凪)
 
