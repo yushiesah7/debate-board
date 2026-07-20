@@ -433,32 +433,12 @@ export function createServer({
     broadcast({ type: 'update' });
   }
 
-  /**
-   * @param {string} topic
-   * @param {number} maxRounds
-   * @param {string} [extraRules] - 開始モーダルの追加ルール（commonへ追記結合される）
-   */
-  function startDebate(topic, maxRounds, extraRules) {
-    // ルール3層を構成: defaultSnapshotはstart時に毎回ファイルから読んで固定保存。
-    // common/byIdは開始前ステージング。開始モーダルのextraRulesはcommonへ追記結合
-    const extra = typeof extraRules === 'string' ? extraRules.trim() : '';
-    const common = sessionRules.common && extra
-      ? `${sessionRules.common}\n${extra}`
-      : sessionRules.common || extra;
-    const rules = {
-      defaultSnapshot: readDefaultRules(rulesPath),
-      common,
-      byId: { ...sessionRules.byId },
-    };
-    speaking = null; // 前の議論の残留インジケータをクリア
-    const board = createDebate(stateDir, topic, { maxRounds, rules, participants });
-    currentBoard = board;
-
+  /** currentBoard（あれば）向けにアダプタ群を組み立て、runDebateをバックグラウンド起動する */
+  function launchDebate(board) {
     const adaptersMap = {};
     for (const p of board.participants) {
       adaptersMap[p.id] = buildAdapterFor(p);
     }
-
     // バックグラウンド起動（awaitしない）。runDebateはエンジン仕様上reject
     // しない設計だが、万一の例外でプロセスが落ちないよう防御的にcatchする。
     runDebate({
@@ -468,7 +448,76 @@ export function createServer({
       onEvent: onEngineEvent,
       humanTimeoutMs: HUMAN_TIMEOUT_MS,
     }).catch(() => {});
+  }
 
+  /**
+   * @param {string} topic
+   * @param {number} maxRounds
+   * @param {string} [extraRules] - 開始モーダルの追加ルール（commonへ追記結合される）
+   * @param {{cards?:boolean, notes?:boolean, rules?:boolean, summaryCard?:boolean}|null} [inherit]
+   *   - 前回の議論（ended状態のcurrentBoard）からの引き継ぎ指定。前回boardが無ければ無視
+   */
+  function startDebate(topic, maxRounds, extraRules, inherit) {
+    // 引き継ぎ元: endedなboardがあるときだけ有効
+    const prev = currentBoard && currentBoard.meta.status === 'ended' ? currentBoard : null;
+    const inheritOpts = prev && inherit && typeof inherit === 'object' ? inherit : null;
+
+    // ルール3層を構成: defaultSnapshotはstart時に毎回ファイルから読んで固定保存。
+    // 通常はステージング（sessionRules）、inherit.rules指定時は前回boardのcommon/byIdを優先採用
+    const baseRules =
+      inheritOpts?.rules && prev ? normalizeRules(prev.meta.rules) : sessionRules;
+    const extra = typeof extraRules === 'string' ? extraRules.trim() : '';
+    const common = baseRules.common && extra
+      ? `${baseRules.common}\n${extra}`
+      : baseRules.common || extra;
+    const rules = {
+      defaultSnapshot: readDefaultRules(rulesPath),
+      common,
+      byId: { ...baseRules.byId },
+    };
+    speaking = null; // 前の議論の残留インジケータをクリア
+    const board = createDebate(stateDir, topic, { maxRounds, rules, participants });
+
+    // ---- 前回の議論からのseed（cards / notes / summaryCard） ----
+    if (inheritOpts) {
+      const now = new Date().toISOString();
+      if (inheritOpts.cards && Array.isArray(prev.cards)) {
+        for (const c of prev.cards) {
+          if (!c || typeof c !== 'object') continue;
+          board.cards.push({
+            id: `c${board.meta.cardSeq++}`, // 新ID採番（cardSeq整合）
+            lane: c.lane,
+            title: c.title,
+            body: c.body,
+            createdBy: c.createdBy, // 維持
+            updatedBy: c.updatedBy ?? c.createdBy,
+            updatedAt: now,
+          });
+        }
+      }
+      if (inheritOpts.notes && prev.notes && typeof prev.notes === 'object') {
+        for (const [pid, text] of Object.entries(prev.notes)) {
+          if (typeof text === 'string' && pid in board.notes) {
+            board.notes[pid] = text;
+          }
+        }
+      }
+      if (inheritOpts.summaryCard && typeof prev.summary === 'string' && prev.summary.trim() !== '') {
+        board.cards.push({
+          id: `c${board.meta.cardSeq++}`,
+          lane: 'decided',
+          title: `📋 前回の結論（${prev.meta.topic}）`,
+          body: prev.summary,
+          createdBy: 'inherit',
+          updatedBy: 'inherit',
+          updatedAt: now,
+        });
+      }
+      saveBoard(stateDir, board); // seed分を確定保存してからエンジン起動
+    }
+
+    currentBoard = board;
+    launchDebate(board);
     return board;
   }
 
@@ -519,6 +568,7 @@ export function createServer({
       '/api/start': handleStart,
       '/api/pause': handlePause,
       '/api/end': handleEnd,
+      '/api/extend': handleExtend,
       '/api/toggle': handleToggle,
       '/api/participant': handleParticipant,
       '/api/session-rules': handleSessionRules,
@@ -649,7 +699,49 @@ export function createServer({
     if (enabledCount < 2) {
       return sendError(res, 400, 'at least 2 enabled participants are required to start');
     }
-    startDebate(body.topic, maxRounds, extraRules);
+    let inherit = null;
+    if (body.inherit !== undefined && body.inherit !== null) {
+      if (typeof body.inherit !== 'object' || Array.isArray(body.inherit)) {
+        return sendError(res, 400, 'inherit must be an object when specified');
+      }
+      inherit = {
+        cards: !!body.inherit.cards,
+        notes: !!body.inherit.notes,
+        rules: !!body.inherit.rules,
+        summaryCard: !!body.inherit.summaryCard,
+      };
+    }
+    startDebate(body.topic, maxRounds, extraRules, inherit);
+    return sendJson(res, 200, buildStateResponse());
+  }
+
+  /**
+   * POST /api/extend — ラウンド延長（＋終了後の再開）。
+   * - 実行中/一時停止中: maxRounds += rounds（エンジンは毎周 board.meta.maxRounds を
+   *   生値で評価するのでそのまま効く）
+   * - 終了後: maxRounds加算→status="running"へ戻しendedBy=nullにしてから runDebate を
+   *   再起動（既存の再開セマンティクス: transcriptから履歴復元・meta.round+1から続き。
+   *   engineのended即no-opガードに掛からないようstatusを戻してから呼ぶ）。
+   *   summaryは再終了時のシンセシスで上書きされる
+   * - 議論なし（idle）: 400／rounds不正（整数1〜20以外）: 400
+   */
+  function handleExtend(body, res) {
+    if (!currentBoard) return sendError(res, 400, 'no debate to extend');
+    const rounds = body.rounds;
+    if (!Number.isInteger(rounds) || rounds < 1 || rounds > 20) {
+      return sendError(res, 400, 'rounds must be an integer in 1..20');
+    }
+    currentBoard.meta.maxRounds += rounds;
+    if (currentBoard.meta.status === 'ended') {
+      // 終了後の再開: 進行状態へ戻してエンジンを再起動する
+      currentBoard.meta.status = 'running';
+      currentBoard.meta.endedBy = null;
+      saveBoard(stateDir, currentBoard);
+      launchDebate(currentBoard);
+    } else {
+      saveBoard(stateDir, currentBoard);
+    }
+    broadcast({ type: 'update' });
     return sendJson(res, 200, buildStateResponse());
   }
 

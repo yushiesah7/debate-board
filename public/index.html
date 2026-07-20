@@ -350,6 +350,17 @@
     color: var(--accent);
   }
   .transcript-round { color: var(--text-dim); font-weight: 400; }
+  .copy-btn {
+    background: none;
+    border: none;
+    padding: 0 4px;
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity 0.15s;
+    cursor: pointer;
+  }
+  .transcript-entry:hover .copy-btn { opacity: 0.8; }
+  .copy-btn:hover { opacity: 1 !important; }
   .transcript-body { font-size: 13px; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 
   #note-area {
@@ -441,6 +452,7 @@
   <h1>debate-board</h1>
   <div id="topic-display">お題未設定</div>
   <div id="round-display">ラウンド -</div>
+  <button id="btn-extend" style="display:none; font-size:11px; padding:2px 8px;" title="ラウンドを延長する">＋延長</button>
   <div id="speaking-display" style="display:none;"></div>
   <div id="status-display" class="status-idle">停止中</div>
   <div id="header-actions">
@@ -492,7 +504,8 @@
 <!-- カード編集モーダル -->
 <div class="modal-overlay" id="card-modal">
   <div class="modal-box">
-    <h3 id="card-modal-title">カード編集</h3>
+    <h3 id="card-modal-title" style="display:inline-block;">カード編集</h3>
+    <button id="card-modal-copy" type="button" title="タイトル＋本文をコピー" style="font-size:12px; padding:2px 8px; margin-left:6px;">📋</button>
     <label>レーン</label>
     <select id="card-modal-lane">
       <option value="decided">✅ decided</option>
@@ -521,6 +534,13 @@
     <label>今回だけの追加ルール（任意・共通ルールに追記）</label>
     <textarea id="start-rules-input" maxlength="4000" placeholder="例: 編集はLab\repos\xxxのみ可／結論は3案まで" style="min-height:70px;"></textarea>
     <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">デフォルトルールは PARTICIPANT_RULES.md（常時適用・読み取り専用）。共通・個別ルールは📜から編集できます</div>
+    <div id="start-inherit-section" style="display:none; margin-top:12px; border:1px dashed var(--border); border-radius:8px; padding:8px 10px;">
+      <div style="font-size:12px; font-weight:600; margin-bottom:4px;">📦 前回の議論から引き継ぐ（チェックしなければまっさらで開始）</div>
+      <label style="display:inline-flex; align-items:center; gap:4px; margin:2px 10px 2px 0; font-size:12px; color:var(--text);"><input type="checkbox" id="inherit-cards" style="width:auto;">カード</label>
+      <label style="display:inline-flex; align-items:center; gap:4px; margin:2px 10px 2px 0; font-size:12px; color:var(--text);"><input type="checkbox" id="inherit-notes" style="width:auto;">NOTE</label>
+      <label style="display:inline-flex; align-items:center; gap:4px; margin:2px 10px 2px 0; font-size:12px; color:var(--text);"><input type="checkbox" id="inherit-rules" style="width:auto;">ルール</label>
+      <label style="display:inline-flex; align-items:center; gap:4px; margin:2px 10px 2px 0; font-size:12px; color:var(--text);"><input type="checkbox" id="inherit-summary-card" style="width:auto;">前回の結論をカード化</label>
+    </div>
     <div id="start-error"></div>
     <div class="modal-actions">
       <button id="start-modal-cancel">キャンセル</button>
@@ -740,6 +760,45 @@
     return p ? p.name : pid;
   }
 
+  // ワンクリックコピー（clipboard API → 失敗時は一時textarea+execCommandフォールバック）
+  function copyText(text) {
+    function fallback() {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        showToast(ok ? "コピーしました" : "コピーに失敗しました");
+      } catch (err) {
+        showToast("コピーに失敗しました");
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () {
+        showToast("コピーしました");
+      }).catch(fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  function makeCopyBtn(getText, title) {
+    var btn = document.createElement("button");
+    btn.className = "copy-btn";
+    btn.type = "button";
+    btn.textContent = "📋";
+    btn.title = title || "コピー";
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      copyText(getText());
+    });
+    return btn;
+  }
+
   function maybeNotifyEndedCardEdit() {
     if (MOCK) return;
     var status = state && state.board.meta && state.board.meta.status;
@@ -840,6 +899,10 @@
       var cur = state.board.meta.status;
       if (cur === "running") state.board.meta.status = "paused";
       else if (cur === "paused") state.board.meta.status = "running";
+    } else if (path === "/api/extend") {
+      var addRounds = body.rounds || 1;
+      state.board.meta.maxRounds = (state.board.meta.maxRounds || 4) + addRounds;
+      if (state.board.meta.status === "ended") state.board.meta.status = "running";
     } else if (path === "/api/toggle") {
       var p = state.participants.find(function (x) { return x.id === body.id; });
       if (p) p.enabled = !!body.enabled;
@@ -963,6 +1026,18 @@
     // 新しい議論が動き出したらended用の情報トーストフラグをリセット
     if (meta.status === "running") endedCardNoticeShown = false;
 
+    // ＋延長ボタン: 実行中/一時停止中=「＋延長」、終了後=「延長して再開」、idle=非表示
+    var extendBtn = document.getElementById("btn-extend");
+    if (meta.status === "running" || meta.status === "paused" || meta.status === "ending") {
+      extendBtn.textContent = "＋延長";
+      extendBtn.style.display = "";
+    } else if (meta.status === "ended") {
+      extendBtn.textContent = "延長して再開";
+      extendBtn.style.display = "";
+    } else {
+      extendBtn.style.display = "none";
+    }
+
     // ヘッダの「発言中: <名前>」表示（speaking時のみ）
     var speakingEl = document.getElementById("speaking-display");
     var sp = getSpeaking();
@@ -993,6 +1068,9 @@
       panel.innerHTML = '<div class="summary-title"></div><div class="summary-body"></div>';
       panel.querySelector(".summary-title").textContent = "📋 結論サマリ";
       panel.querySelector(".summary-body").textContent = summary;
+      var sumCopy = makeCopyBtn(function () { return summary; }, "結論サマリをコピー");
+      sumCopy.style.opacity = "0.8"; // パネルは常時表示（ホバー起点の親が無いため）
+      panel.querySelector(".summary-title").appendChild(sumCopy);
       panel.classList.add("show");
     } else {
       panel.classList.remove("show");
@@ -1156,8 +1234,11 @@
           '<div class="transcript-body"></div>';
         el.querySelector(".transcript-head span").textContent = entry.name || entry.speaker || entry.participantId || "?";
         el.querySelector(".transcript-round").textContent = "R" + entry.round;
-        el.querySelector(".transcript-body").textContent =
-          entry.text != null ? entry.text : (entry.utterance || "");
+        var bodyText = entry.text != null ? entry.text : (entry.utterance || "");
+        el.querySelector(".transcript-body").textContent = bodyText;
+        // ホバーで出る📋コピー（本文のみ・textContentベース）
+        var headEl = el.querySelector(".transcript-head");
+        headEl.insertBefore(makeCopyBtn(function () { return bodyText; }, "発言をコピー"), headEl.lastChild);
         content.appendChild(el);
       });
       // 発言ログ末尾の一時行「考え中」（turn/updateで実発言に置き換わったら消える）
@@ -1209,6 +1290,12 @@
       });
       toolbar.appendChild(expBtn);
       toolbar.appendChild(impBtn);
+      var noteCopy = makeCopyBtn(function () {
+        var ta = document.getElementById("note-textarea");
+        return ta ? ta.value : "";
+      }, "このNOTEをコピー");
+      noteCopy.style.opacity = "0.8";
+      toolbar.appendChild(noteCopy);
       wrap.appendChild(toolbar);
       var textarea = document.createElement("textarea");
       textarea.id = "note-textarea";
@@ -1333,6 +1420,11 @@
     });
   });
 
+  document.getElementById("card-modal-copy").addEventListener("click", function () {
+    var title = document.getElementById("card-modal-title-input").value;
+    var body = document.getElementById("card-modal-body-input").value;
+    copyText(title + "\n" + body);
+  });
   document.getElementById("card-modal-cancel").addEventListener("click", closeCardModal);
   document.getElementById("card-modal").addEventListener("click", function (e) {
     if (e.target.id === "card-modal") closeCardModal();
@@ -1483,6 +1575,12 @@
     document.getElementById("start-rounds-input").value = 4;
     document.getElementById("start-rules-input").value = "";
     document.getElementById("start-error").textContent = "";
+    // 📦 引き継ぎセクション: 前回のended boardがある時のみ表示（既定は全OFF）
+    var hasPrev = !!(state && state.board.meta.status === "ended");
+    document.getElementById("start-inherit-section").style.display = hasPrev ? "" : "none";
+    ["inherit-cards", "inherit-notes", "inherit-rules", "inherit-summary-card"].forEach(function (id) {
+      document.getElementById(id).checked = false;
+    });
     document.getElementById("start-modal").classList.add("show");
   });
   document.getElementById("start-modal-cancel").addEventListener("click", function () {
@@ -1508,6 +1606,23 @@
     var extraRules = document.getElementById("start-rules-input").value.trim();
     var startBody = { topic: topic, maxRounds: rounds };
     if (extraRules) startBody.rules = extraRules;
+    // 📦 前回の議論からの引き継ぎ（前回ended boardがある時のみUI表示。既定は全OFF=まっさら開始）
+    var inheritSection = document.getElementById("start-inherit-section");
+    if (inheritSection.style.display !== "none") {
+      var inherit = {
+        cards: document.getElementById("inherit-cards").checked,
+        notes: document.getElementById("inherit-notes").checked,
+        rules: document.getElementById("inherit-rules").checked,
+        summaryCard: document.getElementById("inherit-summary-card").checked
+      };
+      if (inherit.cards || inherit.notes || inherit.rules || inherit.summaryCard) {
+        if (MOCK) {
+          log("inherit指定（モックでは適用されません）", inherit);
+        } else {
+          startBody.inherit = inherit;
+        }
+      }
+    }
     apiPost("/api/start", startBody);
     document.getElementById("start-modal").classList.remove("show");
   });
@@ -1730,6 +1845,22 @@
   });
   document.getElementById("rules-modal").addEventListener("click", function (e) {
     if (e.target.id === "rules-modal") document.getElementById("rules-modal").classList.remove("show");
+  });
+
+  document.getElementById("btn-extend").addEventListener("click", function () {
+    var wasEnded = state && state.board.meta.status === "ended";
+    var input = window.prompt("何ラウンド延長しますか？（1〜20）", "1");
+    if (input === null) return; // キャンセル
+    var rounds = parseInt(String(input).trim(), 10);
+    if (!Number.isInteger(rounds) || rounds < 1 || rounds > 20) {
+      showToast("1〜20の整数を入力してください");
+      return;
+    }
+    apiPost("/api/extend", { rounds: rounds }).then(function (r) {
+      if (r && r.ok) {
+        showToast(wasEnded ? rounds + "ラウンド延長して再開しました" : rounds + "ラウンド延長しました");
+      }
+    });
   });
 
   document.getElementById("btn-pause").addEventListener("click", function () {

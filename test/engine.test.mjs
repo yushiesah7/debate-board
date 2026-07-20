@@ -706,3 +706,36 @@ test('turn-startがspeak前に発行され、turn-start→turnの対が全ター
   assert.ok(synthIdx < endedIdx);
   assert.equal(events[synthIdx].participantId, 'a'); // 先頭のenabled AI
 });
+
+// --------------------------------------------------------------------
+// ラウンド延長（maxRoundsの生値評価）
+// --------------------------------------------------------------------
+
+test('実行中のboard.meta.maxRounds増加（延長）がループ条件に効く', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({ maxRounds: 3 }));
+
+  const roundsSeen = [];
+  const adapters = {
+    a: {
+      async speak(ctx) {
+        if (ctx.round !== undefined) {
+          roundsSeen.push(ctx.round);
+          if (ctx.round === 2) {
+            board.meta.maxRounds = 4; // 2ラウンド目の途中で延長（POST /api/extend相当）
+          }
+        }
+        return { utterance: `AのR${ctx.round ?? '-'}`, cardOps: [], pass: false };
+      },
+    },
+    b: alwaysSpeakAdapter('B'),
+  };
+
+  await runDebate({ stateDir, board, adapters });
+
+  // 3ラウンド設定→2ラウンド目で+1 → 4ラウンド走って終了
+  assert.deepEqual(roundsSeen, [1, 2, 3, 4]);
+  assert.equal(board.meta.round, 4);
+  assert.equal(board.meta.status, 'ended');
+  assert.equal(board.meta.endedBy, 'maxRounds');
+});

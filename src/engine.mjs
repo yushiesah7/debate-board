@@ -100,7 +100,9 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
     return board;
   }
 
-  const maxRounds = board.meta.maxRounds ?? 4;
+  // maxRoundsはconstに捕捉せず、毎周 board.meta.maxRounds の生値で評価する
+  // （実行中の POST /api/extend による延長がそのまま効くようにするため）
+  const currentMaxRounds = () => board.meta.maxRounds ?? 4;
 
   // #2: クラッシュ再開対応 — transcriptから履歴を復元。
   // 完了済みラウンド（round <= board.meta.round）のみ採用し、
@@ -125,7 +127,7 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
 
   let endedBy = null;
 
-  roundLoop: for (let round = board.meta.round + 1; round <= maxRounds; round++) {
+  roundLoop: for (let round = board.meta.round + 1; round <= currentMaxRounds(); round++) {
     if (board.meta.status === 'ending') {
       endedBy = 'ending';
       break roundLoop;
@@ -134,6 +136,8 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
     // トグルはラウンド境界で反映（SPEC §2）
     const participants = enabledParticipants(board);
     const passSet = new Set();
+    // ctx用の現在値（延長が同ラウンド中に起きても表示は開始時点の値で一貫させる）
+    const maxRounds = currentMaxRounds();
 
     for (const participant of participants) {
       if (board.meta.status === 'ending') {

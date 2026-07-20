@@ -139,9 +139,10 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 | GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy,rules:{default,common,byId}},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, speaking:null\|{participantId,round,phase:"turn"\|"synthesis",since}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`。`speaking`は現在speak実行中の参加者=「考え中」表示用） |
 | GET `/api/options` | 応答 `{adapters:{<adapter名>:{models:string[], efforts:string[]}}}`。参加者設定UIの候補。サーバが実環境から自動発見（codex=`~/.codex/models_cache.json`、grok=`grok models`、ollama=`GET /api/tags`、openai-compat=`GET /v1/models`、claude=静的）し、結果を10分メモリキャッシュ。失敗したアダプタは静的フォールバックへ。**常に200** |
 | SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"turn-start","participantId","round"}`（speak開始=考え中）／`{"type":"speaking-progress","participantId","text"}`（話者の出力断片。サーバ側100msスロットル・揮発=stateには載せない）／`{"type":"synthesis-start","participantId"}`（結論まとめ中）／`{"type":"ended"}` |
-| POST `/api/start` | `{topic, maxRounds, rules?}`（ONが2人未満なら400。`rules`は開始モーダルの追加ルール文字列・任意・最大4000字（超過400）。**commonへ追記結合**され、defaultSnapshot＋ステージング済み共通/個別と合わせて `board.meta.rules` を構成） |
+| POST `/api/start` | `{topic, maxRounds, rules?, inherit?}`（ONが2人未満なら400。`rules`は開始モーダルの追加ルール文字列・任意・最大4000字（超過400）・**commonへ追記結合**。`inherit`は`{cards?,notes?,rules?,summaryCard?}`のbool群＝**前回のended boardからの引き継ぎ**: cards=全カードを新ID採番でコピー、notes=コピー、rules=前回のcommon/byIdをステージングより優先、summaryCard=前回summaryを`📋 前回の結論（<前回お題>）`カードとしてdecidedへ（createdBy="inherit"）。前回boardが無ければ無視） |
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |
 | POST `/api/end` | `{}` |
+| POST `/api/extend` | `{rounds}`（整数1〜20以外400・議論なし400）。実行中: maxRounds加算＝続きのラウンドが走る。終了後: 加算→statusを進行状態へ戻しrunDebateを再起動（transcriptから履歴復元・続きのラウンドから。summaryは再終了時に上書き） |
 | POST `/api/toggle` | `{id, enabled}` |
 | GET `/api/rules` | 応答 `{default: string}` — `PARTICIPANT_RULES.md` の現在の中身（無ければ`""`）。**閲覧専用**（GUIから編集不可）。毎回ファイルから読む。GETのみ（他メソッド405） |
 | POST `/api/session-rules` | `{common?: string, byId?: {<pid>: string}}` 部分更新マージ。byIdの値`""`はそのエントリ削除。common/各エントリ最大4000字（超過400）・非string 400・不正pid 400。idle時=開始前ステージングへ／実行中=board.meta.rulesをmutate＋saveBoard＋SSE update（**次ターンから反映**） |
