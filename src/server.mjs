@@ -25,6 +25,7 @@ import { createDebate, saveBoard, applyCardOps, loadTranscript } from './state.m
 import { runDebate } from './engine.mjs';
 import { resolveAdapter } from './adapters/index.mjs';
 import { makeHuman, HUMAN_TIMEOUT_MS } from './adapters/human.mjs';
+import { discoverAdapterOptions, staticOptionsResponse } from './options.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_INDEX = path.join(__dirname, '..', 'public', 'index.html');
@@ -35,6 +36,9 @@ const MAX_BODY_BYTES = 1024 * 1024;
 
 /** POST /api/participant で model/effort/pcAccess を変更できるアダプタ種別（CLI系のみ）。 */
 const CLI_ADAPTER_NAMES = ['claude', 'codex', 'grok'];
+
+/** GET /api/options の発見結果メモリキャッシュのTTL。 */
+const OPTIONS_CACHE_TTL_MS = 10 * 60 * 1000;
 
 /** @param {number} ms */
 function sleep(ms) {
@@ -117,6 +121,7 @@ function sendError(res, statusCode, message) {
  * @param {Object<string, {speak: (ctx: object) => Promise<object>}>} [args.adapters] - テスト用: participantId -> フェイクアダプタ。指定されたidだけ上書きし、それ以外は通常解決する
  * @param {string} [args.stateDir] - state ルートディレクトリ（既定 "state"）
  * @param {string} [args.configPath] - POST /api/participant の永続化先（既定はリポルートの config.json）
+ * @param {(args: object) => Promise<{adapters: object}>} [args.discoverOptions] - テスト用: GET /api/options の発見関数の差し替え（既定は options.mjs の実装）
  * @returns {import('node:http').Server}
  */
 export function createServer({
@@ -124,6 +129,7 @@ export function createServer({
   adapters: injectedAdapters,
   stateDir = 'state',
   configPath = DEFAULT_CONFIG_PATH,
+  discoverOptions = discoverAdapterOptions,
 } = {}) {
   if (!config) throw new Error('createServer requires a config');
 
@@ -137,6 +143,10 @@ export function createServer({
   let participants = config.participants.map((p) => ({ ...p }));
   /** @type {Set<import('node:http').ServerResponse>} */
   const sseClients = new Set();
+  /** @type {{data: object, fetchedAt: number}|null} GET /api/options の発見結果キャッシュ（TTL 10分） */
+  let optionsCache = null;
+  /** @type {Promise<object>|null} 収集中の重複実行を防ぐインフライトPromise */
+  let optionsInflight = null;
 
   /** @param {{type:string, [k:string]:any}} event */
   function broadcast(event) {
@@ -346,6 +356,11 @@ export function createServer({
       return serveEvents(req, res);
     }
 
+    if (pathname === '/api/options') {
+      if (req.method !== 'GET') return sendError(res, 405, 'method not allowed');
+      return serveOptions(res);
+    }
+
     const postRoutes = {
       '/api/start': handleStart,
       '/api/pause': handlePause,
@@ -370,6 +385,37 @@ export function createServer({
     }
 
     return sendError(res, 404, 'not found');
+  }
+
+  /**
+   * GET /api/options — 参加者設定UI向けのmodel/effort候補。
+   * 初回呼び出し時に実環境から収集し、10分間メモリキャッシュする。
+   * 発見関数がどう失敗しても静的フォールバックを返し、**常に200**。
+   * @param {import('node:http').ServerResponse} res
+   */
+  async function serveOptions(res) {
+    const now = Date.now();
+    if (optionsCache && now - optionsCache.fetchedAt <= OPTIONS_CACHE_TTL_MS) {
+      return sendJson(res, 200, optionsCache.data);
+    }
+    if (!optionsInflight) {
+      optionsInflight = Promise.resolve()
+        .then(() => discoverOptions({ config }))
+        .then((data) => {
+          if (!data || typeof data !== 'object' || !data.adapters) {
+            return staticOptionsResponse();
+          }
+          return data;
+        })
+        .catch(() => staticOptionsResponse())
+        .then((data) => {
+          optionsCache = { data, fetchedAt: Date.now() };
+          optionsInflight = null;
+          return data;
+        });
+    }
+    const data = await optionsInflight;
+    return sendJson(res, 200, data);
   }
 
   /** @param {import('node:http').ServerResponse} res */

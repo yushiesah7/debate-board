@@ -123,6 +123,7 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 | メソッド/パス | ボディ / 応答 |
 |---|---|
 | GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`） |
+| GET `/api/options` | 応答 `{adapters:{<adapter名>:{models:string[], efforts:string[]}}}`。参加者設定UIの候補。サーバが実環境から自動発見（codex=`~/.codex/models_cache.json`、grok=`grok models`、ollama=`GET /api/tags`、openai-compat=`GET /v1/models`、claude=静的）し、結果を10分メモリキャッシュ。失敗したアダプタは静的フォールバックへ。**常に200** |
 | SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"ended"}` |
 | POST `/api/start` | `{topic, maxRounds}`（ONが2人未満なら400） |
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |

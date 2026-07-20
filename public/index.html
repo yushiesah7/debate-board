@@ -474,7 +474,10 @@
     <div id="participant-modal-name" style="font-size:14px; font-weight:600;"></div>
     <div id="participant-modal-adapter" style="font-size:11px; color:var(--text-dim); margin-top:2px;"></div>
 
-    <label for="participant-modal-model">model</label>
+    <div style="display:flex; align-items:center; justify-content:space-between;">
+      <label for="participant-modal-model" style="display:inline-block;">model</label>
+      <button id="participant-modal-refresh" type="button" title="実環境から候補を再取得" style="font-size:10px; padding:1px 8px;">↻ 再取得</button>
+    </div>
     <input id="participant-modal-model" type="text" list="participant-model-options" placeholder="未指定=CLI既定を継承" maxlength="100">
     <datalist id="participant-model-options"></datalist>
 
@@ -574,6 +577,9 @@
     grok: ["low", "medium", "high"]
   };
   var participantModalTargetId = null;
+  var participantModalAdapter = null; // 現在モーダルに表示中のadapter（候補の非同期反映用）
+  var adapterOptionsCache = null; // GET /api/options の応答（クライアント側は初回のみ取得しメモリキャッシュ）
+  var adapterOptionsPromise = null; // 取得中の重複fetch防止
 
   function log() {
     // モック時の擬似POSTログ
@@ -1099,16 +1105,59 @@
     });
   }
 
+  // GET /api/options を取得（初回のみ・以後メモリキャッシュ。force=trueで強制再取得）。
+  // 失敗・モックモード時は null を返し、静的候補フォールバックに任せる。ロード中も入力はブロックしない。
+  function fetchAdapterOptions(force) {
+    if (MOCK) return Promise.resolve(null);
+    if (adapterOptionsCache && !force) return Promise.resolve(adapterOptionsCache);
+    if (adapterOptionsPromise && !force) return adapterOptionsPromise;
+    adapterOptionsPromise = fetch("/api/options").then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status + " /api/options");
+      return res.json();
+    }).then(function (data) {
+      adapterOptionsCache = (data && data.adapters) ? data : null;
+      adapterOptionsPromise = null;
+      return adapterOptionsCache;
+    }).catch(function (err) {
+      console.warn("options fetch failed (静的候補で継続):", err);
+      adapterOptionsPromise = null;
+      return null;
+    });
+    return adapterOptionsPromise;
+  }
+
+  // adapterの候補をdatalistへ反映（自動発見の応答があればそれを優先、なければ静的候補）
+  function applyDatalistsFor(adapter) {
+    var models = MODEL_SUGGESTIONS[adapter] || [];
+    var efforts = EFFORT_SUGGESTIONS[adapter] || [];
+    if (adapterOptionsCache && adapterOptionsCache.adapters && adapterOptionsCache.adapters[adapter]) {
+      var opt = adapterOptionsCache.adapters[adapter];
+      if (Array.isArray(opt.models) && opt.models.length > 0) models = opt.models;
+      if (Array.isArray(opt.efforts) && opt.efforts.length > 0) efforts = opt.efforts;
+    }
+    fillDatalist("participant-model-options", models);
+    fillDatalist("participant-effort-options", efforts);
+  }
+
+  function refreshDatalistsAsync(adapter, force) {
+    fetchAdapterOptions(force).then(function (data) {
+      // モーダルが閉じられた/別参加者に切り替わった後の応答は捨てる
+      if (!data || participantModalAdapter !== adapter) return;
+      applyDatalistsFor(adapter);
+    });
+  }
+
   function openParticipantModal(p) {
     participantModalTargetId = p.id;
+    participantModalAdapter = p.adapter;
     document.getElementById("participant-modal-name").textContent = p.name;
     document.getElementById("participant-modal-adapter").textContent = "adapter: " + p.adapter;
     document.getElementById("participant-modal-model").value = p.model || "";
     document.getElementById("participant-modal-effort").value = p.effort || "";
     document.getElementById("participant-modal-pcaccess").value = p.pcAccess || "read";
 
-    fillDatalist("participant-model-options", MODEL_SUGGESTIONS[p.adapter] || []);
-    fillDatalist("participant-effort-options", EFFORT_SUGGESTIONS[p.adapter] || []);
+    applyDatalistsFor(p.adapter); // まず静的候補（or 既取得キャッシュ）を即表示
+    refreshDatalistsAsync(p.adapter, false); // 実環境の候補を非同期で上書き
 
     var isCli = CLI_ADAPTERS.indexOf(p.adapter) !== -1;
     document.getElementById("participant-modal-effort").style.display = isCli ? "" : "none";
@@ -1119,8 +1168,20 @@
   }
 
   function closeParticipantModal() {
+    participantModalAdapter = null;
     document.getElementById("participant-modal").classList.remove("show");
   }
+
+  document.getElementById("participant-modal-refresh").addEventListener("click", function () {
+    if (MOCK) { showToast("モックモード中は候補を再取得できません"); return; }
+    var adapter = participantModalAdapter;
+    if (!adapter) return;
+    fetchAdapterOptions(true).then(function (data) {
+      if (participantModalAdapter !== adapter) return;
+      applyDatalistsFor(adapter);
+      showToast(data ? "候補を再取得しました" : "候補の再取得に失敗しました（静的候補で継続）");
+    });
+  });
 
   document.getElementById("participant-modal-cancel").addEventListener("click", closeParticipantModal);
   document.getElementById("participant-modal").addEventListener("click", function (e) {

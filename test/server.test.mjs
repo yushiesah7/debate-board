@@ -12,6 +12,14 @@ import path from 'node:path';
 import http from 'node:http';
 
 import { createServer } from '../src/server.mjs';
+import {
+  parseCodexModelsCache,
+  parseGrokModelsOutput,
+  parseOllamaTags,
+  parseOpenAiModels,
+  discoverAdapterOptions,
+  STATIC_OPTIONS,
+} from '../src/options.mjs';
 
 const TOPIC = 'きのこ vs たけのこ';
 
@@ -484,6 +492,164 @@ test('POST /api/participant: 実行中の議論のboard.participantsにも次タ
   await postJson(`${baseUrl}/api/skip`, {}); // ラウンド2へ進める
   await waitFor(() => seenModels.length >= 2);
   assert.equal(seenModels[1], 'opus'); // ラウンド2以降のspeak呼び出しに新しいmodelが渡る
+});
+
+// --------------------------------------------------------------------
+// GET /api/options（候補の自動発見）
+// --------------------------------------------------------------------
+
+test('parseCodexModelsCache: models[].slug を抽出する（実ファイル形フィクスチャ）', () => {
+  const fixture = JSON.stringify({
+    models: [
+      { slug: 'gpt-5.6-luna', display_name: 'GPT-5.6 Luna', default_reasoning_effort: 'medium' },
+      { slug: 'gpt-5.6-mini', display_name: 'GPT-5.6 Mini' },
+      { display_name: 'slugなしは無視される' },
+      { slug: '' },
+    ],
+  });
+  assert.deepEqual(parseCodexModelsCache(fixture), ['gpt-5.6-luna', 'gpt-5.6-mini']);
+});
+
+test('parseCodexModelsCache: 不正JSON・models欠落はthrowする', () => {
+  assert.throws(() => parseCodexModelsCache('{not json'));
+  assert.throws(() => parseCodexModelsCache('{"foo": 1}'));
+  assert.throws(() => parseCodexModelsCache('null'));
+});
+
+test('parseGrokModelsOutput: Available models: 以降の * 行から抽出し (default) 注記を除去する', () => {
+  const stdout = 'なにかのヘッダ\nAvailable models:\n  * grok-4.5 (default)\n  * grok-4\n  * grok-3-mini\n';
+  assert.deepEqual(parseGrokModelsOutput(stdout), ['grok-4.5', 'grok-4', 'grok-3-mini']);
+});
+
+test('parseGrokModelsOutput: マーカーが無い・空出力は空配列', () => {
+  assert.deepEqual(parseGrokModelsOutput(''), []);
+  assert.deepEqual(parseGrokModelsOutput('* grok-4.5'), []); // マーカーより前の行は対象外
+  assert.deepEqual(parseGrokModelsOutput('Available models:\n(none)'), []);
+});
+
+test('parseOllamaTags / parseOpenAiModels: 応答からモデル名を抽出、形不正は空配列', () => {
+  assert.deepEqual(parseOllamaTags({ models: [{ name: 'qwen3:8b' }, { name: 'llama3' }, {}] }), ['qwen3:8b', 'llama3']);
+  assert.deepEqual(parseOllamaTags({}), []);
+  assert.deepEqual(parseOpenAiModels({ data: [{ id: 'local-model' }, { id: '' }] }), ['local-model']);
+  assert.deepEqual(parseOpenAiModels(null), []);
+});
+
+test('discoverAdapterOptions: 全発見が失敗しても静的フォールバックで解決する（throwしない）', async () => {
+  const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-options-home-')); // .codexなし
+  const result = await discoverAdapterOptions({
+    config: {
+      port: 0,
+      maxRounds: 2,
+      participants: [
+        { id: 'a', name: 'A', adapter: 'claude', enabled: true },
+        { id: 'local', name: 'L', adapter: 'ollama', endpoint: 'http://127.0.0.1:1', enabled: false },
+        { id: 'oai', name: 'O', adapter: 'openai-compat', endpoint: 'http://127.0.0.1:1', enabled: false },
+      ],
+    },
+    homedir: emptyHome,
+    runProcessImpl: async () => ({ code: null, stdout: '', stderr: '', timedOut: false, spawnError: new Error('ENOENT') }),
+    resolveCommandImpl: (c) => c,
+    fetchImpl: async () => { throw new Error('connection refused'); },
+  });
+  assert.deepEqual(result.adapters.claude, STATIC_OPTIONS.claude);
+  assert.deepEqual(result.adapters.codex, STATIC_OPTIONS.codex);
+  assert.deepEqual(result.adapters.grok, STATIC_OPTIONS.grok);
+  assert.deepEqual(result.adapters.ollama.models, []);
+  assert.deepEqual(result.adapters['openai-compat'].models, []);
+});
+
+test('discoverAdapterOptions: 注入実装から実環境相当の候補を発見する', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-options-home2-'));
+  fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.codex', 'models_cache.json'),
+    JSON.stringify({ models: [{ slug: 'gpt-5.6-luna' }, { slug: 'gpt-5.6-mini' }] }),
+    'utf8'
+  );
+  const result = await discoverAdapterOptions({
+    config: {
+      port: 0,
+      maxRounds: 2,
+      participants: [
+        { id: 'local', name: 'L', adapter: 'ollama', endpoint: 'http://127.0.0.1:11434/', enabled: false },
+      ],
+    },
+    homedir: home,
+    runProcessImpl: async () => ({
+      code: 0,
+      stdout: 'Available models:\n  * grok-4.5 (default)\n  * grok-4\n',
+      stderr: '',
+      timedOut: false,
+      spawnError: null,
+    }),
+    resolveCommandImpl: (c) => c,
+    fetchImpl: async (url) => {
+      assert.equal(url, 'http://127.0.0.1:11434/api/tags'); // endpoint末尾スラッシュが正規化される
+      return { ok: true, json: async () => ({ models: [{ name: 'qwen3:8b' }] }) };
+    },
+  });
+  assert.deepEqual(result.adapters.codex.models, ['gpt-5.6-luna', 'gpt-5.6-mini']);
+  assert.deepEqual(result.adapters.grok.models, ['grok-4.5', 'grok-4']);
+  assert.deepEqual(result.adapters.ollama.models, ['qwen3:8b']);
+  // effortsは常に静的定義
+  assert.deepEqual(result.adapters.codex.efforts, STATIC_OPTIONS.codex.efforts);
+});
+
+test('GET /api/options: 注入した発見関数の結果を200で返し、2回目はキャッシュされる', async (t) => {
+  let calls = 0;
+  const fakeOptions = {
+    adapters: {
+      claude: { models: ['sonnet', 'opus'], efforts: ['low', 'high'] },
+      codex: { models: ['gpt-5.6-luna'], efforts: ['medium'] },
+      grok: { models: ['grok-4.5'], efforts: ['low'] },
+      ollama: { models: [], efforts: [] },
+      'openai-compat': { models: [], efforts: [] },
+    },
+  };
+  const stateDir = makeStateDir();
+  const config = { port: 0, maxRounds: 2, participants: defaultParticipants() };
+  const server = createServer({
+    config,
+    adapters: { a: fakeSpeaker('A'), b: fakeSpeaker('B') },
+    stateDir,
+    discoverOptions: async () => {
+      calls += 1;
+      return fakeOptions;
+    },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  t.after(() => new Promise((resolve) => server.close(() => resolve())));
+
+  const first = await getJson(`${baseUrl}/api/options`);
+  assert.equal(first.status, 200);
+  assert.deepEqual(Object.keys(first.body.adapters).sort(), ['claude', 'codex', 'grok', 'ollama', 'openai-compat']);
+  assert.deepEqual(first.body.adapters.claude.models, ['sonnet', 'opus']);
+
+  const second = await getJson(`${baseUrl}/api/options`);
+  assert.equal(second.status, 200);
+  assert.equal(calls, 1); // 10分TTL内はメモリキャッシュから返る
+});
+
+test('GET /api/options: 発見関数がthrowしても静的フォールバックで200', async (t) => {
+  const stateDir = makeStateDir();
+  const config = { port: 0, maxRounds: 2, participants: defaultParticipants() };
+  const server = createServer({
+    config,
+    adapters: { a: fakeSpeaker('A'), b: fakeSpeaker('B') },
+    stateDir,
+    discoverOptions: async () => {
+      throw new Error('discovery exploded');
+    },
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  t.after(() => new Promise((resolve) => server.close(() => resolve())));
+
+  const res = await getJson(`${baseUrl}/api/options`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(Object.keys(res.body.adapters).sort(), ['claude', 'codex', 'grok', 'ollama', 'openai-compat']);
+  assert.deepEqual(res.body.adapters.claude.models, STATIC_OPTIONS.claude.models);
 });
 
 test('サーバは静的にpublic/index.htmlを配信する', async (t) => {
