@@ -240,15 +240,56 @@ export function createServer({
     };
   }
 
+  /** speaking-progress SSEのスロットル間隔（洪水防止。断片は間隔内でまとめて1通にする） */
+  const PROGRESS_THROTTLE_MS = 100;
+
+  /**
+   * ctx.onProgress を注入するラッパー。アダプタが流すテキスト断片を
+   * 100ms毎にまとめて `{"type":"speaking-progress","participantId","text"}` として
+   * SSEブロードキャストする（/api/stateには載せない揮発表示。リロードで消えてよい）。
+   * @param {{speak: (ctx: object) => Promise<object>}} inner
+   * @param {string} participantId
+   */
+  function withProgress(inner, participantId) {
+    return {
+      async speak(ctx) {
+        let buf = '';
+        /** @type {NodeJS.Timeout|null} */
+        let timer = null;
+        const flush = () => {
+          timer = null;
+          if (buf === '') return;
+          const text = buf;
+          buf = '';
+          broadcast({ type: 'speaking-progress', participantId, text });
+        };
+        const onProgress = (text) => {
+          if (typeof text !== 'string' || text === '') return;
+          buf += text;
+          if (!timer) {
+            timer = setTimeout(flush, PROGRESS_THROTTLE_MS);
+            timer.unref?.();
+          }
+        };
+        try {
+          return await inner.speak({ ...ctx, onProgress });
+        } finally {
+          if (timer) clearTimeout(timer);
+          flush(); // 最後の断片を取りこぼさない
+        }
+      },
+    };
+  }
+
   /** @param {object} participant */
   function buildAdapterFor(participant) {
     if (injectedAdapters && injectedAdapters[participant.id]) {
-      return withPauseGate(injectedAdapters[participant.id]);
+      return withPauseGate(withProgress(injectedAdapters[participant.id], participant.id));
     }
     if (participant.adapter === 'human') {
-      return withPauseGate(makeHuman(humanBridge));
+      return withPauseGate(makeHuman(humanBridge)); // humanは進捗なし（入力バーが出る）
     }
-    return withPauseGate({ speak: resolveAdapter(participant.adapter) });
+    return withPauseGate(withProgress({ speak: resolveAdapter(participant.adapter) }, participant.id));
   }
 
   function currentParticipantsView() {

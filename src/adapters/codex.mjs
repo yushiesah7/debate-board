@@ -126,6 +126,48 @@ function tryExtractFromLine(line) {
 }
 
 /**
+ * codex JSONL の1行から進捗表示用テキストを抜き出す純関数。
+ * - item.completed / agent_message: 本文全文
+ * - item.started|completed / command_execution: 「[コマンド実行] <command>」
+ * - item.completed / reasoning: 「[思考] <text>」
+ * - item.completed / web_search: 「[検索] <query>」
+ * 対象外の行・非JSON行は null。
+ * @param {string} line
+ * @returns {string|null}
+ */
+export function extractCodexProgress(line) {
+  let obj;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  const item = /** @type {any} */ (obj).item;
+  if (!item || typeof item !== "object") return null;
+
+  if (obj.type === "item.completed" && item.type === "agent_message" && typeof item.text === "string") {
+    return item.text;
+  }
+  if (
+    (obj.type === "item.started" || obj.type === "item.completed") &&
+    item.type === "command_execution" &&
+    typeof item.command === "string"
+  ) {
+    // startedで「実行中」を見せる。completedは同文になるためstartedのみ通知
+    if (obj.type === "item.started") return `[コマンド実行] ${item.command}`;
+    return null;
+  }
+  if (obj.type === "item.completed" && item.type === "reasoning" && typeof item.text === "string") {
+    return `[思考] ${item.text}`;
+  }
+  if (obj.type === "item.completed" && item.type === "web_search" && typeof item.query === "string") {
+    return `[検索] ${item.query}`;
+  }
+  return null;
+}
+
+/**
  * Parse codex `--json` JSONL stdout into a normalized TurnResult.
  *
  * Real envelope shape (verified on codex CLI, 2026-07-20):
@@ -207,7 +249,7 @@ export function parseCodexOutput(stdout) {
  */
 export async function speak(ctx) {
   try {
-    const { participant, promptText, schemaJson } = ctx;
+    const { participant, promptText, schemaJson, onProgress } = ctx;
     const command = resolveCommand("codex");
 
     return await runWithRetry(async () => {
@@ -229,6 +271,19 @@ export async function speak(ctx) {
           input: buildCodexInput(participant?.persona, promptText),
           timeoutMs: DEFAULT_TIMEOUT_MS,
           cwd,
+          onStdoutLine:
+            typeof onProgress === "function"
+              ? (line) => {
+                  const text = extractCodexProgress(line);
+                  if (text) {
+                    try {
+                      onProgress(text);
+                    } catch {
+                      // onProgress内の例外は握りつぶす
+                    }
+                  }
+                }
+              : undefined,
         });
         if (result.spawnError) throw result.spawnError;
         if (result.timedOut) throw new Error("codex adapter: timed out");

@@ -3,7 +3,7 @@
  * Grok CLI adapter.
  * Spawns:
  *   grok --prompt-file <tmp/prompt.txt> --json-schema <inline JSON>
- *        --output-format json --system-prompt-override <persona>
+ *        --output-format streaming-json --system-prompt-override <persona>
  *        --cwd <tmpdir> --no-memory --disable-web-search
  *        --permission-mode <plan|bypassPermissions> --max-turns <6|10>
  * (permission mode / max turns are driven by the participant's pcAccess
@@ -11,8 +11,16 @@
  * The prompt is written to a temp file and passed via `--prompt-file`
  * (verified real flag in `grok --help`) instead of an argv literal — this
  * avoids the Windows command-line length limit for long board prompts.
- * The response is a single JSON object; `structuredOutput` is preferred,
- * falling back to parsing the free-form `text` field.
+ *
+ * streaming-json の実形式（実CLIで1shot確認, 2026-07-20）:
+ *   {"type":"thought","data":"<思考断片>"}   … reasoningのトークン断片
+ *   {"type":"text","data":"<本文断片>"}      … 応答テキストのトークン断片
+ *   {"type":"end","stopReason":"EndTurn",...,"structuredOutput":{...}}
+ * 最終行の end イベントが structuredOutput（--json-schema準拠）を運ぶ。
+ * 進捗: thought/text の data 断片を ctx.onProgress へ流す。
+ * 最終結果: end.structuredOutput を優先、無ければ text断片の連結をパース。
+ * 旧 `--output-format json`（単一JSON envelope）出力もフォールバックで
+ * パース可能（後方互換・テスト済み経路の非破壊）。
  */
 
 import fs from "node:fs";
@@ -56,7 +64,7 @@ export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd, pcAcce
     "--json-schema",
     JSON.stringify(schemaJson ?? {}),
     "--output-format",
-    "json",
+    "streaming-json",
     "--system-prompt-override",
     persona ?? "",
     "--cwd",
@@ -74,11 +82,74 @@ export function buildGrokArgs({ promptFilePath, schemaJson, persona, cwd, pcAcce
 }
 
 /**
- * Parse grok's `--output-format json` stdout into a normalized TurnResult.
+ * streaming-json の1行から進捗テキスト断片を抜き出す純関数。
+ * thought（思考）/ text（本文）どちらの断片も対象。他の行・非JSON行は null。
+ * @param {string} line
+ * @returns {string|null}
+ */
+export function extractGrokProgress(line) {
+  let obj;
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  if ((obj.type === "text" || obj.type === "thought") && typeof obj.data === "string" && obj.data !== "") {
+    return obj.data;
+  }
+  return null;
+}
+
+/**
+ * Parse grok's stdout into a normalized TurnResult.
+ *
+ * Primary path (streaming-json): 最後の type:"end" 行の structuredOutput を採用。
+ * structuredOutput が無ければ text断片（type:"text" の data）を連結してパース。
+ * Fallback path (旧 --output-format json): 単一JSON envelope（structuredOutput
+ * 優先・text フィールドの二次パース）。
  * @param {string} stdout
  * @returns {import('./util.mjs').TurnResult}
  */
 export function parseGrokOutput(stdout) {
+  // ---- streaming-json（JSONL）経路 ----
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  /** @type {any[]} */
+  const parsedLines = [];
+  for (const line of lines) {
+    try {
+      parsedLines.push(JSON.parse(line));
+    } catch {
+      // 非JSON行はスキップ
+    }
+  }
+  const hasStreamEvents = parsedLines.some(
+    (o) => o && typeof o === "object" && (o.type === "end" || o.type === "text" || o.type === "thought")
+  );
+  if (hasStreamEvents) {
+    for (let i = parsedLines.length - 1; i >= 0; i--) {
+      const obj = parsedLines[i];
+      if (obj && typeof obj === "object" && obj.type === "end") {
+        if (obj.structuredOutput && typeof obj.structuredOutput === "object") {
+          return normalizeTurnResult(obj.structuredOutput);
+        }
+        break; // endはあるがstructuredOutputなし → text断片連結へ
+      }
+    }
+    const joined = parsedLines
+      .filter((o) => o && typeof o === "object" && o.type === "text" && typeof o.data === "string")
+      .map((o) => o.data)
+      .join("");
+    if (joined.trim() !== "") {
+      return normalizeTurnResult(parseModelJson(joined));
+    }
+    throw new Error("grok adapter: streaming output had no structuredOutput and no text fragments");
+  }
+
+  // ---- 旧 --output-format json（単一envelope）フォールバック ----
   const envelope = parseModelJson(stdout);
   if (envelope && typeof envelope === "object") {
     const obj = /** @type {Record<string, unknown>} */ (envelope);
@@ -99,7 +170,7 @@ export function parseGrokOutput(stdout) {
  */
 export async function speak(ctx) {
   try {
-    const { participant, promptText, schemaJson } = ctx;
+    const { participant, promptText, schemaJson, onProgress } = ctx;
     const command = resolveCommand("grok");
 
     return await runWithRetry(async () => {
@@ -121,6 +192,19 @@ export async function speak(ctx) {
           args,
           timeoutMs: DEFAULT_TIMEOUT_MS,
           cwd,
+          onStdoutLine:
+            typeof onProgress === "function"
+              ? (line) => {
+                  const text = extractGrokProgress(line);
+                  if (text) {
+                    try {
+                      onProgress(text);
+                    } catch {
+                      // onProgress内の例外は握りつぶす
+                    }
+                  }
+                }
+              : undefined,
         });
         if (result.spawnError) throw result.spawnError;
         if (result.timedOut) throw new Error("grok adapter: timed out");

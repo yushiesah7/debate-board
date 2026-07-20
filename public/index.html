@@ -200,6 +200,22 @@
     text-align: left;
     animation: thinking-dots 1.5s steps(1, end) infinite;
   }
+  /* 話者の出力が流れるライブボックス（speaking-progress） */
+  .thinking-live {
+    margin-top: 6px;
+    max-height: 180px;
+    overflow-y: auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-family: Consolas, Monaco, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
   @keyframes thinking-dots {
     0% { content: ""; }
     25% { content: "."; }
@@ -690,6 +706,25 @@
 
   var endedCardNoticeShown = false; // ended後のカード操作の情報トーストは一度だけ
 
+  // 現在の話者のライブ出力（speaking-progress SSEの連結。揮発・リロードで消える）
+  var speakingProgressText = "";
+  var SPEAKING_PROGRESS_MAX_CHARS = 20000; // 約20KBのメモリガード（超えたら先頭から捨てる）
+
+  function appendSpeakingProgress(text) {
+    speakingProgressText += text;
+    if (speakingProgressText.length > SPEAKING_PROGRESS_MAX_CHARS) {
+      speakingProgressText = speakingProgressText.slice(-SPEAKING_PROGRESS_MAX_CHARS);
+    }
+    // ライブボックスが表示中ならDOM直接更新（100ms毎の全rerenderを避ける）
+    var live = document.getElementById("thinking-live");
+    if (live) {
+      live.textContent = speakingProgressText;
+      live.scrollTop = live.scrollHeight;
+    } else if (activeSideTab === "transcript") {
+      renderTabContent(); // 初回断片: ボックスごと作る
+    }
+  }
+
   // 現在speak実行中の参加者（サーバの speaking フィールド）。
   // humanのターンは既存の入力バーが出るので「考え中」表示はしない（二重表示防止）。
   function getSpeaking() {
@@ -1139,6 +1174,16 @@
         dots.className = "thinking-dots";
         thinking.appendChild(label);
         thinking.appendChild(dots);
+        // 話者の出力が流れるライブボックス（speaking-progress受信分）
+        if (speakingProgressText) {
+          var live = document.createElement("div");
+          live.className = "thinking-live";
+          live.id = "thinking-live";
+          live.textContent = speakingProgressText;
+          thinking.appendChild(live);
+          // 追記後に最下部へ（renderTabContent直後にも効くようdeferなしで直接設定）
+          live.scrollTop = live.scrollHeight;
+        }
         content.appendChild(thinking);
       }
       content.scrollTop = content.scrollHeight;
@@ -1747,12 +1792,20 @@
         } else if (msg.type === "turn-start") {
           if (state) {
             state.speaking = { participantId: msg.participantId, round: msg.round, phase: "turn" };
+            speakingProgressText = ""; // 話者が替わったのでライブボックスをリセット
             render();
           }
         } else if (msg.type === "synthesis-start") {
           if (state) {
             state.speaking = { participantId: msg.participantId, round: null, phase: "synthesis" };
+            speakingProgressText = "";
             render();
+          }
+        } else if (msg.type === "speaking-progress") {
+          // 現在の話者の断片だけ表示（古い話者の遅延断片は捨てる）
+          if (state && state.speaking && state.speaking.participantId === msg.participantId &&
+              typeof msg.text === "string" && msg.text !== "") {
+            appendSpeakingProgress(msg.text);
           }
         } else if (msg.type === "ended") {
           fetchState().then(function (s) {

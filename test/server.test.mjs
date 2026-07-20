@@ -1071,6 +1071,65 @@ test('/api/state の speaking がターン中に設定され、ended後は null 
   assert.equal(after.body.speaking, null);
 });
 
+test('speaking-progress: フェイクアダプタのctx.onProgress断片がSSEでまとめて届く', async (t) => {
+  const stateDir = makeStateDir();
+  const config = {
+    port: 0,
+    maxRounds: 1,
+    participants: [
+      { id: 'a', name: 'A', adapter: 'claude', enabled: true },
+      { id: 'b', name: 'B', adapter: 'codex', enabled: true },
+    ],
+  };
+  const progressSpeaker = (label) => ({
+    async speak(ctx) {
+      if (typeof ctx.onProgress === 'function') {
+        ctx.onProgress(`${label}の断片1`);
+        ctx.onProgress(`${label}の断片2`);
+        await new Promise((r) => setTimeout(r, 150)); // スロットル(100ms)を跨がせてflushさせる
+        ctx.onProgress(`${label}の断片3`);
+      }
+      return { utterance: `${label}発言`, cardOps: [], noteUpdate: null, pass: true, error: null };
+    },
+  });
+  const server = createServer({
+    config,
+    adapters: { a: progressSpeaker('A'), b: progressSpeaker('B') },
+    stateDir,
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const sseReqs = [];
+  t.after(
+    () =>
+      new Promise((resolve) => {
+        for (const req of sseReqs) {
+          try {
+            req.destroy();
+          } catch {
+            /* already closed */
+          }
+        }
+        server.close(() => resolve());
+      })
+  );
+  const sse = connectSSE(`${baseUrl}/api/events`, sseReqs);
+
+  await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 1 });
+  await waitFor(() => sse.events.some((e) => e.type === 'ended'));
+
+  const progressEvents = sse.events.filter((e) => e.type === 'speaking-progress');
+  assert.ok(progressEvents.length > 0, 'speaking-progressイベントが届くこと');
+  // Aの断片: スロットルにより1+2はまとめて1通、3は別便（少なくとも全文が揃う）
+  const aText = progressEvents.filter((e) => e.participantId === 'a').map((e) => e.text).join('');
+  assert.ok(aText.includes('Aの断片1Aの断片2'));
+  assert.ok(aText.includes('Aの断片3'));
+  const bText = progressEvents.filter((e) => e.participantId === 'b').map((e) => e.text).join('');
+  assert.ok(bText.includes('Bの断片1'));
+  // participantIdが必ず付いている
+  assert.ok(progressEvents.every((e) => typeof e.participantId === 'string'));
+});
+
 test('サーバは静的にpublic/index.htmlを配信する', async (t) => {
   const { baseUrl } = await startTestServer(t);
   const res = await fetch(`${baseUrl}/`);

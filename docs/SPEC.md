@@ -138,7 +138,7 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 |---|---|
 | GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy,rules:{default,common,byId}},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, speaking:null\|{participantId,round,phase:"turn"\|"synthesis",since}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`。`speaking`は現在speak実行中の参加者=「考え中」表示用） |
 | GET `/api/options` | 応答 `{adapters:{<adapter名>:{models:string[], efforts:string[]}}}`。参加者設定UIの候補。サーバが実環境から自動発見（codex=`~/.codex/models_cache.json`、grok=`grok models`、ollama=`GET /api/tags`、openai-compat=`GET /v1/models`、claude=静的）し、結果を10分メモリキャッシュ。失敗したアダプタは静的フォールバックへ。**常に200** |
-| SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"turn-start","participantId","round"}`（speak開始=考え中）／`{"type":"synthesis-start","participantId"}`（結論まとめ中）／`{"type":"ended"}` |
+| SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"turn-start","participantId","round"}`（speak開始=考え中）／`{"type":"speaking-progress","participantId","text"}`（話者の出力断片。サーバ側100msスロットル・揮発=stateには載せない）／`{"type":"synthesis-start","participantId"}`（結論まとめ中）／`{"type":"ended"}` |
 | POST `/api/start` | `{topic, maxRounds, rules?}`（ONが2人未満なら400。`rules`は開始モーダルの追加ルール文字列・任意・最大4000字（超過400）。**commonへ追記結合**され、defaultSnapshot＋ステージング済み共通/個別と合わせて `board.meta.rules` を構成） |
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |
 | POST `/api/end` | `{}` |

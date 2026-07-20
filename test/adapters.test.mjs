@@ -26,14 +26,15 @@ import {
   MAX_OUTPUT_BYTES,
 } from "../src/adapters/util.mjs";
 
-import { buildClaudeArgs, parseClaudeOutput } from "../src/adapters/claude.mjs";
+import { buildClaudeArgs, parseClaudeOutput, extractClaudeProgress } from "../src/adapters/claude.mjs";
 import {
   buildCodexArgs,
   buildCodexInput,
   parseCodexOutput,
+  extractCodexProgress,
   speak as codexSpeak,
 } from "../src/adapters/codex.mjs";
-import { buildGrokArgs, parseGrokOutput, speak as grokSpeak } from "../src/adapters/grok.mjs";
+import { buildGrokArgs, parseGrokOutput, extractGrokProgress, speak as grokSpeak } from "../src/adapters/grok.mjs";
 import {
   buildOllamaRequestBody,
   parseOllamaResponse,
@@ -166,10 +167,12 @@ test("resolveCommand is a no-op on non-Windows platforms", () => {
 // ---------------------------------------------------------------------------
 
 test("buildClaudeArgs builds expected argv (pcAccess read = no extra flags)", () => {
+  // stream-json は --print 時 --verbose 必須（進捗ストリーミング対応。実CLIで確認済み）
   const expected = [
     "-p",
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--model",
     "sonnet",
     "--system-prompt",
@@ -220,6 +223,72 @@ test("parseClaudeOutput handles a fenced result field", () => {
 
 test("parseClaudeOutput throws on unparsable envelope", () => {
   assert.throws(() => parseClaudeOutput("not json"));
+});
+
+// stream-json（JSONL）形式: 実CLI claude 2.1.215 の1shot実行で確認した形のフィクスチャ
+const CLAUDE_STREAM_FIXTURE = [
+  JSON.stringify({ type: "system", subtype: "init", session_id: "s1" }),
+  JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "thinking", thinking: "（内部思考）" }] },
+  }),
+  JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "断片1 " }] },
+  }),
+  JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: "断片2" }] },
+  }),
+  JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: JSON.stringify({ utterance: "ストリーム最終", cardOps: [], noteUpdate: null, pass: false }),
+  }),
+].join("\n");
+
+test("parseClaudeOutput: stream-json（JSONL）の最終resultイベントからTurnResultを取り出す", () => {
+  const parsed = parseClaudeOutput(CLAUDE_STREAM_FIXTURE);
+  assert.equal(parsed.utterance, "ストリーム最終");
+  assert.equal(parsed.pass, false);
+  assert.equal(parsed.error, null);
+});
+
+test("parseClaudeOutput: stream-jsonのis_error:trueはthrowする（pass+error経路へ）", () => {
+  const stdout = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "result", subtype: "error", is_error: true, result: "ダミー失敗理由" }),
+  ].join("\n");
+  assert.throws(() => parseClaudeOutput(stdout), /ダミー失敗理由/);
+});
+
+test("extractClaudeProgress: assistantのtext断片だけを返す（thinking/system/resultはnull）", () => {
+  const lines = CLAUDE_STREAM_FIXTURE.split("\n");
+  assert.equal(extractClaudeProgress(lines[0]), null); // system
+  assert.equal(extractClaudeProgress(lines[1]), null); // thinkingのみ
+  assert.equal(extractClaudeProgress(lines[2]), "断片1 ");
+  assert.equal(extractClaudeProgress(lines[3]), "断片2");
+  assert.equal(extractClaudeProgress(lines[4]), null); // result
+  assert.equal(extractClaudeProgress("not json"), null);
+});
+
+test("claude speak(): ストリーム断片がonProgressへ届き、最終TurnResultも正しい（子プロセスでstdout再現）", async () => {
+  // 実CLIの代わりにnodeでstream-json形式のstdoutを吐く（resolveCommand("claude")は使わない経路のためspeak自体は呼ばず、runProcess+extract+parseの結線を検証）
+  const fragments = [];
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", `process.stdout.write(${JSON.stringify(CLAUDE_STREAM_FIXTURE + "\n")});`],
+    timeoutMs: 10_000,
+    onStdoutLine: (line) => {
+      const t = extractClaudeProgress(line);
+      if (t) fragments.push(t);
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(fragments, ["断片1 ", "断片2"]);
+  const parsed = parseClaudeOutput(result.stdout);
+  assert.equal(parsed.utterance, "ストリーム最終");
 });
 
 // ---------------------------------------------------------------------------
@@ -339,6 +408,42 @@ test("parseCodexOutput ignores non-agent_message item.completed lines", () => {
   assert.equal(parsed.utterance, "本命");
 });
 
+test("extractCodexProgress: agent_message全文・コマンド実行・思考・検索を進捗ラベル化する", () => {
+  assert.equal(
+    extractCodexProgress(
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "本文全文" } })
+    ),
+    "本文全文"
+  );
+  assert.equal(
+    extractCodexProgress(
+      JSON.stringify({ type: "item.started", item: { type: "command_execution", command: "ls -la" } })
+    ),
+    "[コマンド実行] ls -la"
+  );
+  // completedのcommand_executionは重複通知しない
+  assert.equal(
+    extractCodexProgress(
+      JSON.stringify({ type: "item.completed", item: { type: "command_execution", command: "ls -la" } })
+    ),
+    null
+  );
+  assert.equal(
+    extractCodexProgress(
+      JSON.stringify({ type: "item.completed", item: { type: "reasoning", text: "ダミー思考" } })
+    ),
+    "[思考] ダミー思考"
+  );
+  assert.equal(
+    extractCodexProgress(
+      JSON.stringify({ type: "item.completed", item: { type: "web_search", query: "ダミー検索" } })
+    ),
+    "[検索] ダミー検索"
+  );
+  assert.equal(extractCodexProgress(JSON.stringify({ type: "turn.completed", usage: {} })), null);
+  assert.equal(extractCodexProgress("not json"), null);
+});
+
 test("parseCodexOutput throws with root cause on turn.failed (exit 0 case)", () => {
   const jsonl = [
     JSON.stringify({ type: "thread.started", thread_id: "t1" }),
@@ -409,7 +514,7 @@ test("buildGrokArgs builds expected argv (pcAccess read default: plan / 6 turns)
     "--json-schema",
     JSON.stringify({ type: "object" }),
     "--output-format",
-    "json",
+    "streaming-json",
     "--system-prompt-override",
     "ロキです",
     "--cwd",
@@ -508,6 +613,54 @@ test("parseGrokOutput falls back to parsing text field", () => {
 
 test("parseGrokOutput throws on garbage stdout", () => {
   assert.throws(() => parseGrokOutput("not json"));
+});
+
+// streaming-json形式: 実CLIの1shot実行で確認した形のフィクスチャ
+// {"type":"thought","data":...} / {"type":"text","data":...} / {"type":"end",...,"structuredOutput":{...}}
+const GROK_STREAM_FIXTURE = [
+  JSON.stringify({ type: "thought", data: "考え" }),
+  JSON.stringify({ type: "thought", data: "中" }),
+  JSON.stringify({ type: "text", data: '{"utterance":"スト' }),
+  JSON.stringify({ type: "text", data: 'リーム","cardOps":[],"noteUpdate":null,"pass":true}' }),
+  JSON.stringify({
+    type: "end",
+    stopReason: "EndTurn",
+    structuredOutput: { utterance: "endの構造化出力", cardOps: [], noteUpdate: null, pass: true },
+  }),
+].join("\n");
+
+test("parseGrokOutput: streaming-jsonのendイベントのstructuredOutputを優先する", () => {
+  const parsed = parseGrokOutput(GROK_STREAM_FIXTURE);
+  assert.equal(parsed.utterance, "endの構造化出力");
+  assert.equal(parsed.pass, true);
+});
+
+test("parseGrokOutput: endにstructuredOutputが無ければtext断片の連結をパースする", () => {
+  const stdout = [
+    JSON.stringify({ type: "thought", data: "考え中" }),
+    JSON.stringify({ type: "text", data: '{"utterance":"連結パ' }),
+    JSON.stringify({ type: "text", data: 'ス","pass":false}' }),
+    JSON.stringify({ type: "end", stopReason: "EndTurn" }),
+  ].join("\n");
+  const parsed = parseGrokOutput(stdout);
+  assert.equal(parsed.utterance, "連結パス");
+  assert.equal(parsed.pass, false);
+});
+
+test("parseGrokOutput: text断片もstructuredOutputも無いストリームはthrow", () => {
+  const stdout = [
+    JSON.stringify({ type: "thought", data: "考えだけ" }),
+    JSON.stringify({ type: "end", stopReason: "Cancelled" }),
+  ].join("\n");
+  assert.throws(() => parseGrokOutput(stdout));
+});
+
+test("extractGrokProgress: thought/textのdata断片を返し、end・非JSONはnull", () => {
+  assert.equal(extractGrokProgress(JSON.stringify({ type: "thought", data: "思考断片" })), "思考断片");
+  assert.equal(extractGrokProgress(JSON.stringify({ type: "text", data: "本文断片" })), "本文断片");
+  assert.equal(extractGrokProgress(JSON.stringify({ type: "end", stopReason: "EndTurn" })), null);
+  assert.equal(extractGrokProgress(JSON.stringify({ type: "text", data: "" })), null);
+  assert.equal(extractGrokProgress("not json"), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -1082,6 +1235,36 @@ test("runProcess resolves with spawnError for a nonexistent command", async () =
     timeoutMs: 5_000,
   });
   assert.ok(result.spawnError);
+});
+
+test("runProcess onStdoutLine: チャンク跨ぎ行・CRLF・末尾未完行を正しく行単位で通知する", async () => {
+  // 'a\r\nb' → 少し待って 'c\nd'（改行なしで終了）: 期待行 = ["a", "bc", "d"]
+  const script =
+    'process.stdout.write("a\\r\\nb"); setTimeout(() => { process.stdout.write("c\\nd"); }, 50);';
+  const lines = [];
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", script],
+    timeoutMs: 10_000,
+    onStdoutLine: (line) => lines.push(line),
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(lines, ["a", "bc", "d"]);
+  // 蓄積stdoutは従来どおり全文を保持（既存パーサ非破壊）
+  assert.equal(result.stdout, "a\r\nbc\nd");
+});
+
+test("runProcess onStdoutLine: コールバックの例外は握りつぶされ実行は完走する", async () => {
+  const result = await runProcess({
+    command: process.execPath,
+    args: ["-e", 'process.stdout.write("x\\ny\\n");'],
+    timeoutMs: 10_000,
+    onStdoutLine: () => {
+      throw new Error("broken listener");
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, "x\ny\n");
 });
 
 // ---------------------------------------------------------------------------

@@ -189,7 +189,12 @@ function killTree(child, addTimer) {
  * even if the child ignores kill signals (a grace timer force-resolves).
  * Captured output is capped at MAX_OUTPUT_BYTES per stream; exceeding the cap
  * kills the process tree and surfaces an error.
- * @param {{command:string, args?:string[], input?:string, timeoutMs?:number, cwd?:string}} opts
+ *
+ * `onStdoutLine`（任意）: stdoutの**完成した行**ごとに呼ばれる（チャンク跨ぎの行を
+ * バッファして結合・CRLF対応・close時に末尾の未完行もflush）。従来どおり全stdoutは
+ * 蓄積して返すので、既存の全文パーサは非破壊。コールバック内の例外は握りつぶす
+ * （進捗リスナーの不具合で実行自体を壊さない）。
+ * @param {{command:string, args?:string[], input?:string, timeoutMs?:number, cwd?:string, onStdoutLine?: (line: string) => void}} opts
  * @returns {Promise<ProcessRunResult>}
  */
 export function runProcess({
@@ -198,6 +203,7 @@ export function runProcess({
   input,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   cwd,
+  onStdoutLine,
 }) {
   return new Promise((resolve) => {
     let settled = false;
@@ -274,13 +280,41 @@ export function runProcess({
     child.stdout?.on("error", () => {});
     child.stderr?.on("error", () => {});
 
+    // onStdoutLine用の行バッファ（チャンク境界で行が割れても完成行単位で通知する）
+    let lineBuffer = "";
+    const emitLine = (line) => {
+      if (typeof onStdoutLine !== "function") return;
+      try {
+        onStdoutLine(line);
+      } catch {
+        // 進捗リスナーの例外で実行を壊さない
+      }
+    };
+
     child.stdout?.on("data", (d) => {
-      stdout = capAppend(stdout, d);
+      const text = d.toString("utf8");
+      stdout = capAppend(stdout, text);
+      if (typeof onStdoutLine === "function") {
+        lineBuffer += text;
+        let idx;
+        while ((idx = lineBuffer.indexOf("\n")) !== -1) {
+          let line = lineBuffer.slice(0, idx);
+          lineBuffer = lineBuffer.slice(idx + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1); // CRLF対応
+          emitLine(line);
+        }
+      }
     });
     child.stderr?.on("data", (d) => {
       stderr = capAppend(stderr, d);
     });
     child.on("close", (code) => {
+      // 末尾の改行なし未完行もflushしてから完了
+      if (lineBuffer !== "") {
+        const rest = lineBuffer.endsWith("\r") ? lineBuffer.slice(0, -1) : lineBuffer;
+        lineBuffer = "";
+        emitLine(rest);
+      }
       finish({ code, stdout, stderr, timedOut, spawnError: outputError });
     });
 
