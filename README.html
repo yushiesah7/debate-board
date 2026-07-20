@@ -103,6 +103,16 @@ node src/server.mjs
 </div>
 <p class="muted">※ サーバ無しで <code>public/index.html</code> を直接開くと<b>モックモード</b>（サンプルデータでUIだけ試せる）。</p>
 
+<div class="card">
+  <h3>⏹ 停止方法</h3>
+  <ul>
+    <li>サーバを起動した<b>ターミナルで <code>Ctrl+C</code></b>（これだけ）</li>
+    <li>ターミナルを閉じてしまった場合（PowerShell）:<br>
+      <code>Get-NetTCPConnection -LocalPort 8787 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }</code></li>
+    <li>⚠ 起動は<b>このリポジトリのフォルダに <code>cd</code> してから</b>。<code>Cannot find module ...\src\server.mjs</code> が出たら起動場所が違います</li>
+  </ul>
+</div>
+
 <h2>💻 ターミナル派（CLIモード）</h2>
 <pre><code>node src/cli.mjs "きのこの山 vs たけのこの里、どちらが至高か" 3</code></pre>
 <p>GUI無しでAIだけの議論を実行し、各ターンの発言・カード操作・最後の結論サマリをそのまま表示します（human参加者は自動でOFF）。</p>

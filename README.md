@@ -30,6 +30,23 @@ node src/server.mjs
 
 ※ サーバ無しで `public/index.html` を直接開くとモックモード（サンプルデータでUIだけ試せる）。
 
+## 停止方法
+
+- サーバを起動した**ターミナルで `Ctrl+C`**（これだけ）
+- ターミナルを閉じてしまった等で止められない場合（Windows PowerShell）:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8787 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+```
+
+## よくあるエラー
+
+| エラー | 原因と対処 |
+|---|---|
+| `Cannot find module ...\src\server.mjs` | 起動場所が違う。`cd` でこのリポジトリのフォルダに入ってから実行 |
+| `ポート 8787 は使用中です`（EADDRINUSE） | 既に別のdebate-boardが起動中。そのままブラウザで開くか、上の停止コマンドで止めてから再起動 |
+| 参加者がずっと `(pass)` になる | そのCLIが未インストール/未ログイン。発言ログのエラー内容を確認 |
+
 ## 起動方法（ターミナル / GUI無し）
 
 ```bash
