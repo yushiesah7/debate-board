@@ -11,7 +11,7 @@ import os from 'node:os';
 
 import { createDebate, loadDebate, saveBoard, appendTranscript, loadTranscript, applyCardOps } from '../src/state.mjs';
 import { runDebate } from '../src/engine.mjs';
-import { TURN_SCHEMA } from '../src/prompt.mjs';
+import { TURN_SCHEMA, buildTurnPrompt, buildSynthesisPrompt } from '../src/prompt.mjs';
 
 const TOPIC = 'きのこ vs たけのこ';
 
@@ -515,4 +515,83 @@ test('noteUpdate: null はNOTE更新なしとして扱われる', async () => {
 
   // R2の noteUpdate:null で上書きされず、R1のメモが残る
   assert.equal(board.notes.a, 'R1のメモ');
+});
+
+// --------------------------------------------------------------------
+// 参加AIルール（board.meta.rules → プロンプト注入）
+// --------------------------------------------------------------------
+
+test('buildTurnPrompt: rules非空で「--- ルール（厳守） ---」セクションがお題直後に入る', () => {
+  const board = { cards: [] };
+  const args = {
+    participant: { id: 'a', name: 'A' },
+    topic: TOPIC,
+    round: 1,
+    maxRounds: 2,
+    board,
+    ownNote: '',
+    recentTranscript: [],
+  };
+  const withRules = buildTurnPrompt({ ...args, rules: 'ダミールール本文' });
+  assert.ok(withRules.includes('--- ルール（厳守） ---'));
+  assert.ok(withRules.includes('ダミールール本文'));
+  // お題の直後（かんばん要約より前）に挿入されている
+  assert.ok(withRules.indexOf('--- ルール（厳守） ---') > withRules.indexOf(`お題: ${TOPIC}`));
+  assert.ok(withRules.indexOf('--- ルール（厳守） ---') < withRules.indexOf('--- 現在のかんばん'));
+
+  const without = buildTurnPrompt(args);
+  assert.ok(!without.includes('--- ルール（厳守） ---'));
+  const empty = buildTurnPrompt({ ...args, rules: '   ' });
+  assert.ok(!empty.includes('--- ルール（厳守） ---'));
+});
+
+test('buildSynthesisPrompt: rules有り/無しのセクション挿入', () => {
+  const board = { cards: [] };
+  const withRules = buildSynthesisPrompt({ topic: TOPIC, board, transcriptTail: [], rules: 'ダミールール' });
+  assert.ok(withRules.includes('--- ルール（厳守） ---'));
+  assert.ok(withRules.indexOf('--- ルール（厳守） ---') > withRules.indexOf(`お題: ${TOPIC}`));
+  const without = buildSynthesisPrompt({ topic: TOPIC, board, transcriptTail: [] });
+  assert.ok(!without.includes('--- ルール（厳守） ---'));
+});
+
+test('createDebate: meta.rulesが保存されresume（loadDebate）後も保持される', () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({ rules: 'ダミールール全文' }));
+  assert.equal(board.meta.rules, 'ダミールール全文');
+  const reloaded = loadDebate(stateDir, board.meta.id);
+  assert.equal(reloaded.meta.rules, 'ダミールール全文');
+
+  // rules未指定なら "" になる
+  const board2 = createDebate(stateDir, TOPIC, baseConfig());
+  assert.equal(board2.meta.rules, '');
+});
+
+test('engine: board.meta.rulesがctx.rulesとpromptTextの両方でアダプタへ届く（シンセシス含む）', async () => {
+  const stateDir = makeStateDir();
+  const board = createDebate(stateDir, TOPIC, baseConfig({ maxRounds: 1, rules: 'ダミールール注入テスト' }));
+
+  const seen = { turnCtxRules: null, turnPromptHasRules: false, synthPromptHasRules: false };
+  const adapters = {
+    a: {
+      async speak(ctx) {
+        if (ctx.round !== undefined) {
+          seen.turnCtxRules = ctx.rules;
+          seen.turnPromptHasRules =
+            ctx.promptText.includes('--- ルール（厳守） ---') &&
+            ctx.promptText.includes('ダミールール注入テスト');
+        } else {
+          // シンセシスターン（roundなし）
+          seen.synthPromptHasRules = ctx.promptText.includes('ダミールール注入テスト');
+        }
+        return { utterance: '発言', cardOps: [], pass: false };
+      },
+    },
+    b: alwaysSpeakAdapter('B'),
+  };
+
+  await runDebate({ stateDir, board, adapters });
+
+  assert.equal(seen.turnCtxRules, 'ダミールール注入テスト');
+  assert.equal(seen.turnPromptHasRules, true);
+  assert.equal(seen.synthPromptHasRules, true);
 });

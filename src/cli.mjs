@@ -3,7 +3,7 @@
 /**
  * cli.mjs — M1用のGUI無しターミナルランナー。
  *
- * Usage: node src/cli.mjs "お題" [ラウンド数]
+ * Usage: node src/cli.mjs "お題" [ラウンド数] [今回の追加ルール]
  *
  * config.json（無ければ config.example.json）を読み込み、human参加者は
  * GUIが無いと入力できないため常に enabled=false へ強制してから議論を実行する。
@@ -20,11 +20,12 @@ import { loadConfig } from './config.mjs';
 import { createDebate } from './state.mjs';
 import { runDebate } from './engine.mjs';
 import { resolveAdapter } from './adapters/index.mjs';
+import { composeRules } from './server.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function printUsage() {
-  console.error('使い方: node src/cli.mjs "お題" [ラウンド数]');
+  console.error('使い方: node src/cli.mjs "お題" [ラウンド数] [今回の追加ルール]');
 }
 
 /**
@@ -39,6 +40,7 @@ export async function main(argv) {
     return;
   }
   const roundsArg = argv[1] !== undefined ? Number.parseInt(argv[1], 10) : NaN;
+  const extraRules = typeof argv[2] === 'string' ? argv[2] : '';
 
   const rootDir = path.join(__dirname, '..');
   const config = loadConfig(rootDir);
@@ -59,7 +61,9 @@ export async function main(argv) {
     return;
   }
 
-  const board = createDebate(stateDir, topic, { maxRounds, participants });
+  // 基本ルール（PARTICIPANT_RULES.md。無ければ空）＋今回の追加ルールを合成して注入する
+  const rules = composeRules(path.join(rootDir, 'PARTICIPANT_RULES.md'), extraRules);
+  const board = createDebate(stateDir, topic, { maxRounds, rules, participants });
 
   /** @type {Object<string, {speak: (ctx: object) => Promise<object>}>} */
   const adapters = {};

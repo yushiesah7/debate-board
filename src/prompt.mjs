@@ -86,6 +86,17 @@ export const TURN_SCHEMA = {
 };
 
 /**
+ * ルール文字列を「--- ルール（厳守） ---」セクションの行配列にする。
+ * rules が空・未指定なら空配列（＝セクションごと省略）。
+ * @param {string} [rules]
+ * @returns {string[]}
+ */
+function rulesSection(rules) {
+  if (typeof rules !== 'string' || rules.trim() === '') return [];
+  return ['--- ルール（厳守） ---', rules.trim(), ''];
+}
+
+/**
  * 1ターン分のプロンプトを組み立てる（SPEC §5.1）。
  *
  * @param {object} args
@@ -96,9 +107,10 @@ export const TURN_SCHEMA = {
  * @param {object} args.board
  * @param {string} [args.ownNote]
  * @param {Array<object>} [args.recentTranscript] - 直近2ラウンド分の発言
+ * @param {string} [args.rules] - 参加AIの行動ルール（非空なら「--- ルール（厳守） ---」としてお題の直後に挿入）
  * @returns {string}
  */
-export function buildTurnPrompt({ participant, topic, round, maxRounds, board, ownNote, recentTranscript }) {
+export function buildTurnPrompt({ participant, topic, round, maxRounds, board, ownNote, recentTranscript, rules }) {
   const persona = participant?.persona ? `\nあなたのペルソナ: ${participant.persona}` : '';
   return [
     `あなたは議論の参加者「${participant?.name ?? participant?.id}」です。${persona}`,
@@ -106,6 +118,7 @@ export function buildTurnPrompt({ participant, topic, round, maxRounds, board, o
     `お題: ${topic}`,
     `ラウンド: ${round} / ${maxRounds}`,
     '',
+    ...rulesSection(rules),
     '--- 現在のかんばん（3レーン要約） ---',
     boardSummary(board),
     '',
@@ -134,14 +147,16 @@ export function buildTurnPrompt({ participant, topic, round, maxRounds, board, o
  * @param {string} args.topic
  * @param {object} args.board
  * @param {Array<object>} [args.transcriptTail] - 直近の発言ログ（総括の材料）
+ * @param {string} [args.rules] - 参加AIの行動ルール（非空なら「--- ルール（厳守） ---」としてお題の直後に挿入）
  * @returns {string}
  */
-export function buildSynthesisPrompt({ topic, board, transcriptTail }) {
+export function buildSynthesisPrompt({ topic, board, transcriptTail, rules }) {
   return [
     'あなたはこの議論のまとめ役です。',
     '',
     `お題: ${topic}`,
     '',
+    ...rulesSection(rules),
     '--- 最終的なかんばん（3レーン要約） ---',
     boardSummary(board),
     '',

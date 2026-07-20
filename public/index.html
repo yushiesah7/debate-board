@@ -386,6 +386,7 @@
   <div id="round-display">ラウンド -</div>
   <div id="status-display" class="status-idle">停止中</div>
   <div id="header-actions">
+    <button id="btn-rules" style="display:none;" title="この議論に適用中のルールを表示">📜ルール</button>
     <button id="btn-start" class="primary">開始</button>
     <button id="btn-pause">一時停止</button>
     <button id="btn-end" class="danger">終了</button>
@@ -459,10 +460,24 @@
     <input id="start-topic-input" type="text" maxlength="200" placeholder="例: きのこ vs たけのこ">
     <label>ラウンド数</label>
     <input id="start-rounds-input" type="number" min="1" max="20" value="4">
+    <label>今回だけの追加ルール（任意）</label>
+    <textarea id="start-rules-input" maxlength="4000" placeholder="例: 編集はLab\repos\xxxのみ可／結論は3案まで" style="min-height:70px;"></textarea>
+    <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">基本ルールは PARTICIPANT_RULES.md を編集（常時適用）</div>
     <div id="start-error"></div>
     <div class="modal-actions">
       <button id="start-modal-cancel">キャンセル</button>
       <button id="start-modal-ok" class="primary">開始する</button>
+    </div>
+  </div>
+</div>
+
+<!-- ルール表示モーダル（読み取り専用） -->
+<div class="modal-overlay" id="rules-modal">
+  <div class="modal-box">
+    <h3>📜 この議論のルール</h3>
+    <div id="rules-modal-body" style="font-size:13px; white-space:pre-wrap; word-break:break-word; max-height:60vh; overflow-y:auto; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px;"></div>
+    <div class="modal-actions">
+      <button id="rules-modal-close" class="primary">閉じる</button>
     </div>
   </div>
 </div>
@@ -513,7 +528,7 @@
   function buildMockState() {
     return {
       board: {
-        meta: { topic: "きのこ vs たけのこ", round: 2, status: "paused" },
+        meta: { topic: "きのこ vs たけのこ", round: 2, status: "paused", rules: "" },
         cards: [
           { id: "c1", lane: "decided", title: "呼称は正式表記で統一", body: "「きのこの山」「たけのこの里」の正式商品名で議論する。", createdBy: "凪" },
           { id: "c2", lane: "decided", title: "評価軸は3つに絞る", body: "食感・チョコ比率・携帯性の3軸で比較する。", createdBy: "アキ" },
@@ -668,6 +683,8 @@
       state.board.meta.round = 1;
       state.board.meta.status = "running";
       state.board.meta.maxRounds = body.maxRounds || 4;
+      // モックでは基本ルールファイルを読めないので、追加ルールだけをローカル反映する
+      state.board.meta.rules = body.rules ? "## 今回の追加ルール\n" + body.rules : "";
       state.board.cards = [];
       state.board.summary = null;
       state.transcript = [];
@@ -774,6 +791,13 @@
     renderTabs();
     renderTabContent();
     renderHumanTurn();
+    renderRulesButton();
+  }
+
+  function renderRulesButton() {
+    var btn = document.getElementById("btn-rules");
+    var rules = state.board.meta && state.board.meta.rules;
+    btn.style.display = (typeof rules === "string" && rules.trim().length > 0) ? "" : "none";
   }
 
   function renderSummary() {
@@ -1211,6 +1235,7 @@
   document.getElementById("btn-start").addEventListener("click", function () {
     document.getElementById("start-topic-input").value = (state && state.board.meta.topic) || "";
     document.getElementById("start-rounds-input").value = 4;
+    document.getElementById("start-rules-input").value = "";
     document.getElementById("start-error").textContent = "";
     document.getElementById("start-modal").classList.add("show");
   });
@@ -1234,8 +1259,26 @@
       errEl.textContent = "ONの参加者が2人未満のため開始できません。";
       return;
     }
-    apiPost("/api/start", { topic: topic, maxRounds: rounds });
+    var extraRules = document.getElementById("start-rules-input").value.trim();
+    var startBody = { topic: topic, maxRounds: rounds };
+    if (extraRules) startBody.rules = extraRules;
+    apiPost("/api/start", startBody);
     document.getElementById("start-modal").classList.remove("show");
+  });
+
+  // ------------------------------------------------------------------
+  // ルール表示モーダル（読み取り専用）
+  // ------------------------------------------------------------------
+  document.getElementById("btn-rules").addEventListener("click", function () {
+    var rules = (state && state.board.meta && state.board.meta.rules) || "";
+    document.getElementById("rules-modal-body").textContent = rules;
+    document.getElementById("rules-modal").classList.add("show");
+  });
+  document.getElementById("rules-modal-close").addEventListener("click", function () {
+    document.getElementById("rules-modal").classList.remove("show");
+  });
+  document.getElementById("rules-modal").addEventListener("click", function (e) {
+    if (e.target.id === "rules-modal") document.getElementById("rules-modal").classList.remove("show");
   });
 
   document.getElementById("btn-pause").addEventListener("click", function () {

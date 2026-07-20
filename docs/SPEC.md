@@ -33,6 +33,13 @@
 ollama / openai-compat / human はHTTP・GUIのみでPCに触れないため対象外（指定は無視）。
 grokの `--max-turns` はツール使用の周回上限（1発言の所要時間ガード。ファイル参照の周回分を確保しつつ暴走探索を防ぐ）。
 
+### 参加AIのルール
+
+- **基本ルール**: リポ直下の `PARTICIPANT_RULES.md`（コミット対象）。議論**開始のたびに**読み込むため、編集は次の議論から反映。ファイルが無ければ空扱い
+- **今回の追加ルール**: 開始時に指定（GUI開始モーダル／`POST /api/start` の `rules`／CLI第3引数）。最大4000字
+- 合成: `基本 + "\n\n## 今回の追加ルール\n" + 追加` をサーバ/CLI側で行い `board.meta.rules` に保存（エンジン/stateはfsを読まない純ロジックを維持）
+- 注入: 毎ターンおよびシンセシスのプロンプトで、お題の直後に「--- ルール（厳守） ---」セクションとして挿入（rulesが空ならセクションごと省略）
+
 ### アダプタ種別
 
 | adapter | 実体 | 用途 |
@@ -71,7 +78,7 @@ grokの `--max-turns` はツール使用の周回上限（1発言の所要時間
 ONの参加者に対して config の配列順で:
 
 1. エンジンがプロンプトを組み立てる:
-   - お題／ラウンド番号／3レーン要約（各カード title+1行）／自分のNOTE／直近2ラウンドの発言
+   - お題／ラウンド番号／ルールセクション（`board.meta.rules` が非空なら「--- ルール（厳守） ---」。§2参照）／3レーン要約（各カード title+1行）／自分のNOTE／直近2ラウンドの発言
    - 出力契約（下記JSONスキーマ）
 2. アダプタ経由で呼び出し（タイムアウト120s、失敗は1回リトライ、それでも失敗ならpass扱い＋エラー記録）
 3. 応答JSONを検証 → cardOps適用 → transcript追記 → state保存 → GUIへSSE通知
@@ -122,10 +129,10 @@ state/<debateId>/transcript.jsonl … 発言ログ（追記のみ）
 
 | メソッド/パス | ボディ / 応答 |
 |---|---|
-| GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`） |
+| GET `/api/state` | 応答 `{board:{meta:{topic,round,maxRounds,status,endedBy,rules},cards:[{id,lane,title,body,createdBy}],notes:{<pid>:string},summary}, participants:[{id,name,adapter,enabled,model,effort,pcAccess}], awaitingHuman:null\|{participantId}, transcript:[{round,speaker,text,ts}]}`（`model`/`effort`/`pcAccess`は未設定なら`null`） |
 | GET `/api/options` | 応答 `{adapters:{<adapter名>:{models:string[], efforts:string[]}}}`。参加者設定UIの候補。サーバが実環境から自動発見（codex=`~/.codex/models_cache.json`、grok=`grok models`、ollama=`GET /api/tags`、openai-compat=`GET /v1/models`、claude=静的）し、結果を10分メモリキャッシュ。失敗したアダプタは静的フォールバックへ。**常に200** |
 | SSE `/api/events` | `data:{"type":"update"}`（クライアントは/api/state再取得）／`{"type":"await-human","participantId"}`／`{"type":"ended"}` |
-| POST `/api/start` | `{topic, maxRounds}`（ONが2人未満なら400） |
+| POST `/api/start` | `{topic, maxRounds, rules?}`（ONが2人未満なら400。`rules`は今回だけの追加ルール文字列・任意・最大4000字（超過400）。`PARTICIPANT_RULES.md` の基本ルールとサーバ側で合成され `board.meta.rules` へ） |
 | POST `/api/pause` | `{}`（トグル: running⇄paused） |
 | POST `/api/end` | `{}` |
 | POST `/api/toggle` | `{id, enabled}` |

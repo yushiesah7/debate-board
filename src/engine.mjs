@@ -149,6 +149,7 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
         boardSummary: boardSummary(board),
         ownNote: board.notes[participant.id] ?? '',
         recentTranscript: recentSlice(history, round),
+        rules: typeof board.meta.rules === 'string' ? board.meta.rules : '',
         schemaJson: TURN_SCHEMA,
         humanTimeoutMs,
       };
@@ -162,6 +163,7 @@ export async function runDebate({ stateDir, board, adapters, onEvent, humanTimeo
         board,
         ownNote: ctx.ownNote,
         recentTranscript: ctx.recentTranscript,
+        rules: ctx.rules,
       });
       ctx.prompt = ctx.promptText;
 
@@ -250,12 +252,14 @@ async function runSynthesis({ stateDir, board, history, adapters, emit }) {
   let summary = null;
   if (synthesisParticipant) {
     const transcriptTail = history.slice(-20);
+    const rules = typeof board.meta.rules === 'string' ? board.meta.rules : '';
     const ctx = {
       participant: synthesisParticipant,
       topic: board.meta.topic,
       board,
       transcriptTail,
-      promptText: buildSynthesisPrompt({ topic: board.meta.topic, board, transcriptTail }),
+      rules,
+      promptText: buildSynthesisPrompt({ topic: board.meta.topic, board, transcriptTail, rules }),
     };
     ctx.prompt = ctx.promptText;
     ctx.schemaJson = TURN_SCHEMA;

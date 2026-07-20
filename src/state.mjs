@@ -7,8 +7,9 @@
  *
  * board.json の形:
  *   {
- *     meta: { id, topic, status, round, maxRounds, cardSeq, createdAt, updatedAt, endedBy? },
+ *     meta: { id, topic, status, round, maxRounds, rules, cardSeq, createdAt, updatedAt, endedBy? },
  *       - round は「完了したラウンド番号」（ラウンド完了時にのみ確定書き込みされる）
+ *       - rules は参加AIの行動ルール全文（無ければ ""）。エンジンが毎ターンのプロンプトに注入する
  *       - endedBy は終了時のみ: "maxRounds" | "allPass" | "ending" | "noParticipants"
  *     participants: [{ id, name, adapter, model?, endpoint?, persona?, enabled, pcAccess, effort?, session? }, ...],
  *     cards: [{ id, lane, title, body, createdBy, updatedBy, updatedAt }, ...],
@@ -31,7 +32,8 @@ export const LANES = ['decided', 'discussing', 'held'];
  *
  * @param {string} stateDir - state ルートディレクトリ（例: "state"）
  * @param {string} topic - お題
- * @param {{maxRounds?: number, participants: Array<{id:string,name:string,adapter:string,model?:string,endpoint?:string,persona?:string,enabled:boolean}>}} config
+ * @param {{maxRounds?: number, rules?: string, participants: Array<{id:string,name:string,adapter:string,model?:string,endpoint?:string,persona?:string,enabled:boolean}>}} config
+ *   - rules: 参加AIの行動ルール全文（基本＋今回の追加を呼び出し側で結合済みの文字列。ファイル読込はサーバ/CLI側の責務）
  * @returns {object} 作成された board オブジェクト（board.meta.id に debateId が入る）
  */
 export function createDebate(stateDir, topic, config) {
@@ -64,6 +66,7 @@ export function createDebate(stateDir, topic, config) {
       status: 'running',
       round: 0,
       maxRounds: config?.maxRounds ?? 4,
+      rules: typeof config?.rules === 'string' ? config.rules : '',
       cardSeq: 1,
       createdAt: now,
       updatedAt: now,

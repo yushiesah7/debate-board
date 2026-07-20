@@ -652,6 +652,130 @@ test('GET /api/options: 発見関数がthrowしても静的フォールバック
   assert.deepEqual(res.body.adapters.claude.models, STATIC_OPTIONS.claude.models);
 });
 
+// --------------------------------------------------------------------
+// /api/start の rules（参加AIルールの合成・注入）
+// --------------------------------------------------------------------
+
+/** rulesPath を注入できる素のテストサーバ起動ヘルパー */
+async function startServerWithRulesPath(t, rulesPath, extraCreateOpts = {}) {
+  const stateDir = makeStateDir();
+  const config = { port: 0, maxRounds: 2, participants: defaultParticipants() };
+  const adapters = { a: fakeSpeaker('A'), b: fakeSpeaker('B') };
+  const server = createServer({ config, adapters, stateDir, rulesPath, ...extraCreateOpts });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  t.after(() => new Promise((resolve) => server.close(() => resolve())));
+  return { baseUrl, stateDir };
+}
+
+test('POST /api/start: rules指定でPARTICIPANT_RULES.md（rulesPath）と合成されstateに反映される', async (t) => {
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-rules-test-'));
+  const rulesPath = path.join(rulesDir, 'PARTICIPANT_RULES.md');
+  fs.writeFileSync(rulesPath, '# 基本ルール（テスト用）\n- ダミー基本ルール1\n', 'utf8');
+
+  const { baseUrl } = await startServerWithRulesPath(t, rulesPath);
+  const res = await postJson(`${baseUrl}/api/start`, {
+    topic: TOPIC,
+    maxRounds: 2,
+    rules: '今回だけのダミー追加ルール',
+  });
+  assert.equal(res.status, 200);
+  const rules = res.body.board.meta.rules;
+  assert.ok(rules.includes('ダミー基本ルール1'));
+  assert.ok(rules.includes('## 今回の追加ルール'));
+  assert.ok(rules.includes('今回だけのダミー追加ルール'));
+  // 合成形式: 基本 + "\n\n## 今回の追加ルール\n" + 追加
+  assert.ok(rules.indexOf('ダミー基本ルール1') < rules.indexOf('## 今回の追加ルール'));
+
+  // GET /api/state でも同じrulesが返る
+  const state = await getJson(`${baseUrl}/api/state`);
+  assert.equal(state.body.board.meta.rules, rules);
+});
+
+test('POST /api/start: rules未指定なら基本ルールのみ、基本ファイル無しなら空', async (t) => {
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-rules-test2-'));
+  const rulesPath = path.join(rulesDir, 'PARTICIPANT_RULES.md');
+  fs.writeFileSync(rulesPath, 'ダミー基本のみ', 'utf8');
+  const { baseUrl } = await startServerWithRulesPath(t, rulesPath);
+  const res = await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 2 });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.board.meta.rules, 'ダミー基本のみ');
+
+  // 基本ファイルが存在しない場合（別サーバ）: rulesは空文字
+  const missing = path.join(rulesDir, 'no-such-rules.md');
+  const { baseUrl: baseUrl2 } = await startServerWithRulesPath(t, missing);
+  const res2 = await postJson(`${baseUrl2}/api/start`, { topic: TOPIC, maxRounds: 2 });
+  assert.equal(res2.status, 200);
+  assert.equal(res2.body.board.meta.rules, '');
+});
+
+test('POST /api/start: rulesが4000字超・非文字列は400、ちょうど4000字はOK', async (t) => {
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-rules-test3-'));
+  const { baseUrl } = await startServerWithRulesPath(t, path.join(rulesDir, 'none.md'));
+
+  const tooLong = 'あ'.repeat(4001);
+  const res = await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 2, rules: tooLong });
+  assert.equal(res.status, 400);
+
+  const badType = await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 2, rules: 123 });
+  assert.equal(badType.status, 400);
+
+  const ok = await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 2, rules: 'あ'.repeat(4000) });
+  assert.equal(ok.status, 200);
+});
+
+test('POST /api/start: rulesがフェイクアダプタのpromptTextに注入される', async (t) => {
+  const rulesDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debate-board-rules-test4-'));
+  const rulesPath = path.join(rulesDir, 'PARTICIPANT_RULES.md');
+  fs.writeFileSync(rulesPath, 'ダミー基本ルールX', 'utf8');
+
+  const stateDir = makeStateDir();
+  // human無しの2AI構成（human待ちで議論が止まらないように）
+  const config = {
+    port: 0,
+    maxRounds: 1,
+    participants: [
+      { id: 'a', name: 'A', adapter: 'claude', enabled: true },
+      { id: 'b', name: 'B', adapter: 'codex', enabled: true },
+    ],
+  };
+  const prompts = [];
+  const spy = (label) => ({
+    async speak(ctx) {
+      prompts.push(ctx.promptText);
+      return { utterance: `${label}発言`, cardOps: [], noteUpdate: null, pass: true, error: null };
+    },
+  });
+  const server = createServer({ config, adapters: { a: spy('A'), b: spy('B') }, stateDir, rulesPath });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const sseReqs = [];
+  t.after(
+    () =>
+      new Promise((resolve) => {
+        for (const req of sseReqs) {
+          try {
+            req.destroy();
+          } catch {
+            /* already closed */
+          }
+        }
+        server.close(() => resolve());
+      })
+  );
+  const sse = connectSSE(`${baseUrl}/api/events`, sseReqs);
+
+  await postJson(`${baseUrl}/api/start`, { topic: TOPIC, maxRounds: 1, rules: '追加ルールY' });
+  await waitFor(() => sse.events.some((e) => e.type === 'ended'));
+
+  assert.ok(prompts.length > 0);
+  for (const p of prompts) {
+    assert.ok(p.includes('--- ルール（厳守） ---'));
+    assert.ok(p.includes('ダミー基本ルールX'));
+    assert.ok(p.includes('追加ルールY'));
+  }
+});
+
 test('サーバは静的にpublic/index.htmlを配信する', async (t) => {
   const { baseUrl } = await startTestServer(t);
   const res = await fetch(`${baseUrl}/`);

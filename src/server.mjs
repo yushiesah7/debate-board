@@ -30,6 +30,10 @@ import { discoverAdapterOptions, staticOptionsResponse } from './options.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_INDEX = path.join(__dirname, '..', 'public', 'index.html');
 const DEFAULT_CONFIG_PATH = path.join(__dirname, '..', 'config.json');
+const DEFAULT_RULES_PATH = path.join(__dirname, '..', 'PARTICIPANT_RULES.md');
+
+/** /api/start の追加ルール（rules）の最大文字数。超過は400。 */
+const MAX_EXTRA_RULES_CHARS = 4000;
 
 /** POSTボディの上限（暴走・DoS対策のガード。ローカル専用アプリなので大きめでよい）。 */
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -39,6 +43,29 @@ const CLI_ADAPTER_NAMES = ['claude', 'codex', 'grok'];
 
 /** GET /api/options の発見結果メモリキャッシュのTTL。 */
 const OPTIONS_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * 参加AIの行動ルールを合成する（合成はサーバ/CLI側の責務。engine/stateはfsを読まない）。
+ * 基本ルールは rulesPath（PARTICIPANT_RULES.md）から**開始のたびに**読む
+ * （＝ファイル編集が次の議論から反映される）。ファイルが無ければ空として扱う。
+ * 追加ルール（extraRules）が非空なら「## 今回の追加ルール」見出しで結合する。
+ * @param {string} rulesPath
+ * @param {string} [extraRules]
+ * @returns {string}
+ */
+export function composeRules(rulesPath, extraRules) {
+  let base = '';
+  try {
+    base = fs.readFileSync(rulesPath, 'utf8').trim();
+  } catch {
+    base = '';
+  }
+  const extra = typeof extraRules === 'string' ? extraRules.trim() : '';
+  if (base && extra) return `${base}\n\n## 今回の追加ルール\n${extra}`;
+  if (base) return base;
+  if (extra) return `## 今回の追加ルール\n${extra}`;
+  return '';
+}
 
 /** @param {number} ms */
 function sleep(ms) {
@@ -121,6 +148,7 @@ function sendError(res, statusCode, message) {
  * @param {Object<string, {speak: (ctx: object) => Promise<object>}>} [args.adapters] - テスト用: participantId -> フェイクアダプタ。指定されたidだけ上書きし、それ以外は通常解決する
  * @param {string} [args.stateDir] - state ルートディレクトリ（既定 "state"）
  * @param {string} [args.configPath] - POST /api/participant の永続化先（既定はリポルートの config.json）
+ * @param {string} [args.rulesPath] - 参加AIの基本ルールファイル（既定はリポルートの PARTICIPANT_RULES.md。start時に毎回読む）
  * @param {(args: object) => Promise<{adapters: object}>} [args.discoverOptions] - テスト用: GET /api/options の発見関数の差し替え（既定は options.mjs の実装）
  * @returns {import('node:http').Server}
  */
@@ -129,6 +157,7 @@ export function createServer({
   adapters: injectedAdapters,
   stateDir = 'state',
   configPath = DEFAULT_CONFIG_PATH,
+  rulesPath = DEFAULT_RULES_PATH,
   discoverOptions = discoverAdapterOptions,
 } = {}) {
   if (!config) throw new Error('createServer requires a config');
@@ -249,7 +278,7 @@ export function createServer({
     if (!currentBoard) {
       return {
         board: {
-          meta: { topic: '', round: 0, maxRounds: config.maxRounds, status: 'idle', endedBy: null },
+          meta: { topic: '', round: 0, maxRounds: config.maxRounds, status: 'idle', endedBy: null, rules: '' },
           cards: [],
           notes: {},
           summary: null,
@@ -267,6 +296,7 @@ export function createServer({
           maxRounds: currentBoard.meta.maxRounds,
           status: currentBoard.meta.status,
           endedBy: currentBoard.meta.endedBy ?? null,
+          rules: typeof currentBoard.meta.rules === 'string' ? currentBoard.meta.rules : '',
         },
         cards: currentBoard.cards,
         notes: currentBoard.notes,
@@ -300,9 +330,12 @@ export function createServer({
   /**
    * @param {string} topic
    * @param {number} maxRounds
+   * @param {string} [extraRules] - 開始時の追加ルール（基本ルールファイルと合成される）
    */
-  function startDebate(topic, maxRounds) {
-    const board = createDebate(stateDir, topic, { maxRounds, participants });
+  function startDebate(topic, maxRounds, extraRules) {
+    // 基本ルールはstart時に毎回ファイルから読む（編集が次の議論から反映される）
+    const rules = composeRules(rulesPath, extraRules);
+    const board = createDebate(stateDir, topic, { maxRounds, rules, participants });
     currentBoard = board;
 
     const adaptersMap = {};
@@ -466,11 +499,18 @@ export function createServer({
     }
     const maxRounds =
       Number.isInteger(body.maxRounds) && body.maxRounds > 0 ? body.maxRounds : config.maxRounds;
+    if (body.rules !== undefined && body.rules !== null && typeof body.rules !== 'string') {
+      return sendError(res, 400, 'rules must be a string when specified');
+    }
+    const extraRules = typeof body.rules === 'string' ? body.rules : '';
+    if (extraRules.length > MAX_EXTRA_RULES_CHARS) {
+      return sendError(res, 400, `rules must be at most ${MAX_EXTRA_RULES_CHARS} characters`);
+    }
     const enabledCount = participants.filter((p) => p.enabled).length;
     if (enabledCount < 2) {
       return sendError(res, 400, 'at least 2 enabled participants are required to start');
     }
-    startDebate(body.topic, maxRounds);
+    startDebate(body.topic, maxRounds, extraRules);
     return sendJson(res, 200, buildStateResponse());
   }
 
